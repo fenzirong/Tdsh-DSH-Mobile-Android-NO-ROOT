@@ -93,41 +93,11 @@ public final class IconSwitcher {
             l.add(v(c, "navy", "深空蓝", GROUP_COLOR, p, R.color.icon_bg_navy, R.color.icon_accent_navy));
             l.add(v(c, "ink", "墨黑", GROUP_COLOR, p, R.color.icon_bg_ink, R.color.icon_accent_ink));
             // ── 用户投稿（群里 uu 们发来的图，见 tools/make-user-icons.ps1）──
-            l.add(v(c, "uu01", "四格·大胆孝", GROUP_UU, p, R.color.icon_bg_uu01, R.color.icon_accent_white));
-            l.add(v(c, "uu02", "蒲公英", GROUP_UU, p, R.color.icon_bg_uu02, R.color.icon_accent_white));
-            l.add(v(c, "uu03", "上菜了", GROUP_UU, p, R.color.icon_bg_uu03, R.color.icon_accent_white));
-            l.add(v(c, "uu04", "震撼美味", GROUP_UU, p, R.color.icon_bg_uu04, R.color.icon_accent_white));
-            l.add(v(c, "uu05", "劣等模型", GROUP_UU, p, R.color.icon_bg_uu05, R.color.icon_accent_white));
-            l.add(v(c, "uu06", "蓝发女仆", GROUP_UU, p, R.color.icon_bg_uu06, R.color.icon_accent_white));
-            l.add(v(c, "uu07", "红星19", GROUP_UU, p, R.color.icon_bg_uu07, R.color.icon_accent_white));
-            l.add(v(c, "uu08", "傻笑鲸鱼", GROUP_UU, p, R.color.icon_bg_uu08, R.color.icon_accent_white));
-            l.add(v(c, "uu09", "黑白鲸鱼", GROUP_UU, p, R.color.icon_bg_uu09, R.color.icon_accent_white));
-            l.add(v(c, "uu10", "Q版女仆", GROUP_UU, p, R.color.icon_bg_uu10, R.color.icon_accent_white));
-            l.add(v(c, "uu11", "蓝紫少女", GROUP_UU, p, R.color.icon_bg_uu11, R.color.icon_accent_white));
-            l.add(v(c, "uu12", "弱小可怜但能吃", GROUP_UU, p, R.color.icon_bg_uu12, R.color.icon_accent_white));
-            l.add(v(c, "uu13", "哦鲸鲸…", GROUP_UU, p, R.color.icon_bg_uu13, R.color.icon_accent_white));
-            l.add(v(c, "uu14", "太有魅力了", GROUP_UU, p, R.color.icon_bg_uu14, R.color.icon_accent_white));
-            l.add(v(c, "uu15", "我不是安卓AI！", GROUP_UU, p, R.color.icon_bg_uu15, R.color.icon_accent_white));
-            l.add(v(c, "uu16", "紫猫猫叠叠乐", GROUP_UU, p, R.color.icon_bg_uu16, R.color.icon_accent_white));
-            l.add(v(c, "uu17", "所以呢", GROUP_UU, p, R.color.icon_bg_uu17, R.color.icon_accent_white));
-            l.add(v(c, "uu18", "爱希娜大哭？", GROUP_UU, p, R.color.icon_bg_uu18, R.color.icon_accent_white));
-            l.add(v(c, "uu19", "委屈", GROUP_UU, p, R.color.icon_bg_uu19, R.color.icon_accent_white));
-            l.add(v(c, "uu20", "吃惊", GROUP_UU, p, R.color.icon_bg_uu20, R.color.icon_accent_white));
-            l.add(v(c, "uu21", "这种可爱多搞点", GROUP_UU, p, R.color.icon_bg_uu21, R.color.icon_accent_white));
-            l.add(v(c, "uu22", "无语", GROUP_UU, p, R.color.icon_bg_uu22, R.color.icon_accent_white));
-            l.add(v(c, "uu23", "开心", GROUP_UU, p, R.color.icon_bg_uu23, R.color.icon_accent_white));
-            l.add(v(c, "uu24", "害羞", GROUP_UU, p, R.color.icon_bg_uu24, R.color.icon_accent_white));
-            l.add(v(c, "uu25", "嫌弃", GROUP_UU, p, R.color.icon_bg_uu25, R.color.icon_accent_white));
-            l.add(v(c, "uu26", "睡着了", GROUP_UU, p, R.color.icon_bg_uu26, R.color.icon_accent_white));
             /*
              * 第三批（uu27~uu30）：同一位画师的女仆系列。
              * 名字刻意不带官方产品名 —— 这个 App 从 0.3.0 起就叫 Tdsh，
              * 图标是"群里 uu 投稿的图"，标签按画面内容起个短名就够了。
              */
-            l.add(v(c, "uu27", "鲸鱼女仆", GROUP_UU, p, R.color.icon_bg_uu27, R.color.icon_accent_white));
-            l.add(v(c, "uu28", "困困女仆", GROUP_UU, p, R.color.icon_bg_uu28, R.color.icon_accent_white));
-            l.add(v(c, "uu29", "举蒲公英", GROUP_UU, p, R.color.icon_bg_uu29, R.color.icon_accent_white));
-            l.add(v(c, "uu30", "端茶女仆", GROUP_UU, p, R.color.icon_bg_uu30, R.color.icon_accent_white));
             sAll = l;
         }
         return sAll;

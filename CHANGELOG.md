@@ -6,6 +6,73 @@
 
 ---
 
+## v0.4.8-fz1
+
+> 这是从上游 `Tongyu3/Tdsh-DSH-Mobile-Android-NO-ROOT` v0.4.7 派生的**独立构建分支**。
+> 目的只有一个：**让仓库能真正从源码构建出 APK，并补上几处安全设置**。
+> `versionCode 59 → 60`。**签名密钥与上游不同**，因此：
+
+- 与上游 APK **不能互相覆盖安装**（签名不一致，系统会拒绝）；
+- 装本版前需先卸载上游版 —— 会清掉容器（约 100MB 的 Ubuntu + Node + DSH）、API Key 与白名单；
+- 本版后续升级（同为 `fz` 签名）可正常覆盖。
+
+### A. 修好"仓库编不出来"（上游的构建阻断项）
+
+上游源码快照缺少若干**构建必需**的文件，`./gradlew assembleRelease` 必然失败。本分支补齐：
+
+| 缺什么 | 后果 | 本分支的处理 |
+| --- | --- | --- |
+| `res/xml/method.xml` | aapt2 报 `@xml/method` 不存在，直接 BUILD FAILED | 按标准 IME 声明补上（单 keyboard subtype） |
+| `res/xml/file_paths.xml` | 同上，`@xml/file_paths` 悬空 | 补上 root/external/external-files/files/cache 五条路径 |
+| `R.color.icon_bg_*` / `icon_accent_*`（8 组） | `IconSwitcher` 引用不到符号，javac 失败 | 在 `values/ic_launcher_background.xml` 定义 16 个颜色 |
+| 8 套配色的 mipmap 图标 | manifest 的 `@mipmap/ic_launcher_{white,sky,…}` 找不到 | 仓库根目录其实有一份 `res/`，移进 `app/src/main/res/` |
+| `drawable/ic_whale_mark`、`ball_s01..s09` | `TdshSplashView:595` 引用 `R.drawable.ic_whale_mark`，javac 失败；表情贴纸运行时缺失 | 从官方 v0.4.7 APK 内**原样提取**（作者未提交进 git） |
+| `OverlayService.java` | manifest 声明了 `.OverlayService` 但类不存在，运行期 `ClassNotFoundException` | 从 manifest 移除该死声明（该服务在 0.4.7 已无入口） |
+| `enableV1Signing true` 不生效 | 产物只有 v2/v3，老安装器报"解析包错误" | 补 `v1SigningEnabled true`，实测 v1/v2/v3 三方案齐全 |
+
+**uu 投稿图标（30 个）本次移除**：它们的原图从未随仓库发布，且属于群友投稿素材。
+`IconUu01..30` 的 activity-alias 与 `IconSwitcher` 里的 30 条记录一并删除，
+只保留 8 套内置配色。要恢复的话：把图放进 `tools/usericons-raw/`，跑
+`tools/make-user-icons.ps1`，再按 README 把 alias 加回 manifest。
+
+### B. 安全加固
+
+| 项 | 改动 | 原因 |
+| --- | --- | --- |
+| 特权命令默认开关 | `PhoneBridge.allowPrivSh` 默认值 `true → false` | 原来装上就带着"以 shell 身份执行任意命令"的能力，用户不去关就一直开着 |
+| `DUMP` 权限 | `<uses-permission android:name="android.permission.DUMP" tools:node="remove"/>` | 由 `androidx.profileinstaller` merge 进来，普通应用拿不到，纯权限噪音 |
+| 明文流量 | 用 `networkSecurityConfig` 只放行 `127.0.0.1` / `localhost` | 原来是全局 `usesCleartextTraffic="true"`，任何误跳转都能降级到 HTTP |
+| 版本号 | `versionCode 60` / `versionName 0.4.8-fz1` | 与上游区分，避免误判"可覆盖安装" |
+
+**未改动的高风险设计**（改动会触及容器启动流程，无法在没有真机的情况下验证，
+所以只记录不擅改）：
+
+1. `DSH_PERMISSION_MODE=danger-full-access` + token 只读绑定进容器
+   → 容器内任意进程（含模型拉取的任意 npm 包）可读 token 并调用 `/sh`、`/fs`、`/services`；
+2. `DEEPSEEK_API_KEY` 作为**命令行参数**传给 proot，会出现在 `/proc/<pid>/cmdline`；
+3. `addJavascriptInterface` 的 `DshAndroid` 对同 WebView 的所有 frame 可见，
+   而 iframe 导航不拦（`handleExternalNavigation` 里 `!isMainFrame` 直接放行）；
+4. `/key`（全局按键）不做白名单校验。
+
+### C. 发布流水线
+
+新增 `.github/workflows/release.yml`：打 `v*` tag 即自动
+
+1. 装 `platforms;android-36` + `build-tools;36.0.0`（刻意**不用** `android-actions/setup-android@v3`，
+   它内部跑 `sdkmanager tools` 会必然失败）；
+2. 从 secret 还原签名 keystore；
+3. `assembleRelease`；
+4. `apksigner verify --print-certs` + `aapt2 dump badging` 独立验签；
+5. 产出 `Tdsh-<version>.apk` 与 `SHA256SUMS.txt` 一起发到 Release。
+
+签名指纹（**认准这一个**，与上游不同）：
+
+```
+SHA-256: 48:FA:9A:DA:55:A9:9A:85:CD:8B:00:2A:F3:74:85:5F:C1:CA:6C:D2:0F:D2:45:04:20:4C:87:E5:09:CC:DF:54
+```
+
+---
+
 ## v0.2.7
 
 （`versionCode 31 → 32`，同签名，可直接覆盖安装。）

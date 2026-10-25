@@ -30,8 +30,8 @@ android {
          * 这一支 0.4.2 是主线：插件生态、文件预览与下载、权限扩展、悬浮球改造。
          * versionCode 55 比 0.4.1(53) 高，能覆盖安装且保留数据。
          */
-        versionCode 59
-        versionName "0.4.7"
+        versionCode 60
+        versionName "0.4.8-fz1"
     }
 
     signingConfigs {
@@ -55,6 +55,7 @@ android {
              * 三个都开是 apksigner 官方推荐的最高兼容性组合。
              */
             enableV1Signing true
+            v1SigningEnabled true
             enableV2Signing true
             enableV3Signing true
         }

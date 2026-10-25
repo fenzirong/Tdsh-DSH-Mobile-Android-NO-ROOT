@@ -26,4 +26,7 @@
     <color name="icon_accent_forest">#1B5E20</color>
     <color name="icon_accent_navy">#3949AB</color>
     <color name="icon_accent_ink">#FFFFFF</color>
+
+    <!-- DSH Next 桌面版图标的底色（纯黑；白图案由 ic_launcher_foreground_next 提供） -->
+    <color name="icon_bg_next">#000000</color>
 </resources>

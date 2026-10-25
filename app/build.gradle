@@ -30,8 +30,8 @@ android {
          * 这一支 0.4.2 是主线：插件生态、文件预览与下载、权限扩展、悬浮球改造。
          * versionCode 55 比 0.4.1(53) 高，能覆盖安装且保留数据。
          */
-        versionCode 61
-        versionName "0.4.9-fz1"
+        versionCode 62
+        versionName "0.4.10-fz1"
     }
 
     signingConfigs {

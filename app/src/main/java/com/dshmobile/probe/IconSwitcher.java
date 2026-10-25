@@ -84,7 +84,7 @@ public final class IconSwitcher {
             String p = c.getPackageName();
             List<Variant> l = new ArrayList<>();
             // ── 预置配色：同一只鲸鱼，换背景色 ──
-            l.add(v(c, "white", "经典白", GROUP_COLOR, p, R.color.icon_bg_white, R.color.icon_accent_white));
+            l.add(v(c, "white", "DSH Next", GROUP_COLOR, p, R.color.icon_bg_next, R.color.icon_accent_white));
             l.add(v(c, "sky", "天空蓝", GROUP_COLOR, p, R.color.icon_bg_sky, R.color.icon_accent_sky));
             l.add(v(c, "mint", "薄荷绿", GROUP_COLOR, p, R.color.icon_bg_mint, R.color.icon_accent_mint));
             l.add(v(c, "lilac", "淡紫", GROUP_COLOR, p, R.color.icon_bg_lilac, R.color.icon_accent_lilac));

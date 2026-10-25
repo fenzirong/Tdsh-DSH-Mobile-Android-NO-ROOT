@@ -7,5 +7,5 @@
     <item android:drawable="@color/icon_bg_forest" />
     <item android:gravity="center"
           android:width="48dp" android:height="48dp"
-          android:drawable="@mipmap/ic_launcher_foreground" />
+          android:drawable="@mipmap/ic_launcher_foreground_light" />
 </layer-list>

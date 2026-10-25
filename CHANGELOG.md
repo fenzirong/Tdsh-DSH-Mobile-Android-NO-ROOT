@@ -6,6 +6,30 @@
 
 ---
 
+## v0.4.9-fz1
+
+（`versionCode 60 → 61`，与 v0.4.8-fz1 **同签名，可直接覆盖安装**，不清数据。）
+
+### 桌面图标换成黑色鲸鱼
+
+原来的图标是 DeepSeek 的**蓝色**鲸鱼（主体约 `#4060D0`、腹部与眼睛白色、鳍亮蓝）。
+本次把形状**原样保留**，只重绘颜色：
+
+| 资源 | 处理 |
+| --- | --- |
+| `mipmap-*/ic_launcher_foreground.png` | 用原 alpha 通道重绘为**纯黑剪影**（抗锯齿边缘一并保留，所以小尺寸下不糊） |
+| `mipmap-*/ic_launcher_foreground_light.png`（新增） | 同一 alpha 的**白色剪影**，供深色背景使用 |
+| `mipmap-*/ic_launcher.png`、`ic_launcher_round.png` | 蓝色系像素 → 黑（保留白色腹部高光），给 API&lt;26 与不支持自适应图标的启动器 |
+
+**为什么还要一套白色剪影**：八套配色共用同一个前景图。全黑的鲸鱼放在
+`ink`（`#1C1C1E`）、`navy`（`#1A237E`）、`forest`（`#2E7D5B`）这三套深底上等于看不见。
+所以 `forest` / `navy` / `ink` 三套改指向 `ic_launcher_foreground_light`，
+浅色五套（`white` / `sky` / `mint` / `lilac` / `peach`）继续用黑色鲸鱼。
+
+默认配色仍是 `white`（白底 + 黑鲸鱼）—— 也就是装上看到的那只。
+
+---
+
 ## v0.4.8-fz1
 
 > 这是从上游 `Tongyu3/Tdsh-DSH-Mobile-Android-NO-ROOT` v0.4.7 派生的**独立构建分支**。

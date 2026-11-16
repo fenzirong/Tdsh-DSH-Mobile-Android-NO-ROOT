@@ -119,6 +119,23 @@ public class MainActivity extends Activity {
     /** 开屏是从什么时候开始显示的 —— 用来保证"至少露一下脸"，不做无谓闪烁。 */
     private long splashShownAt = 0L;
     /**
+     * 本次启动开屏至少要显示多久（毫秒）。
+     *
+     * <p>冷启动 = {@link #SPLASH_MIN_MS}（3.4 秒，播完整套分镜）；
+     * 热启动 = {@link #WARM_SPLASH_MIN_MS}（0.2 秒，只盖住首帧）。
+     * 在 {@code onCreate} 里按"容器是否已经在跑"一次定好，之后只读不改。
+     */
+    private long splashMinMs = SPLASH_MIN_MS;
+    /**
+     * 本次是不是**热启动**（容器已经在跑，只差把界面接回来）。
+     *
+     * <p>判据只有一个：`DshService.getUrl() != null` —— 前台服务拿到了 dsh 的地址，
+     * 说明容器活着、页面随时能连上。这个值决定三件事：
+     * 开屏最短时长、就绪后要不要播收尾倒放、等待轮询要不要更密
+     * （见 {@link #onServerReady} 与 {@link #awaitUrl(String)}）。
+     */
+    private boolean warmStart = false;
+    /**
      * 开屏最短显示时长。
      *
      * <p>必须装得下**整套分镜**，否则动画会被拦腰切断 —— 用户就看不到"点→线→面"
@@ -131,8 +148,34 @@ public class MainActivity extends Activity {
      *
      * 必须装得下**整套分镜**（含收尾那段倒放：直角→矩形→空心线→点），
      * 否则动画会被拦腰切断，用户就看不到"返回的过程"。
+     *
+     * ⚠️ 这个值只对**冷启动**成立（容器要从头拉起来，本来就要等 8~12 秒）——
+     * 热启动另有一套更短的时长，见 {@link #WARM_SPLASH_MIN_MS}。
      */
     private static final long SPLASH_MIN_MS = 3400L;
+    /**
+     * **热启动**时开屏的最短展示时长。
+     *
+     * <h3>为什么热启动要单独一套（2026-11-16，用户要求"优化启动速度"）</h3>
+     * {@link #SPLASH_MIN_MS} 存在的唯一理由是"把整套分镜播完"，而分镜只有在
+     * 一段**真实等待**（容器启动 8~12 秒）前面才有意义 —— 那时它是在陪用户等。
+     *
+     * <p>但有一种很常见的启动方式没有这段等待：**前台服务还活着、容器已经在跑**
+     * （划掉最近任务再点开、系统回收 Activity 后重建、从别的 App 切回后重建界面…
+     * 都属于这种）。此时地址已经在 {@code DshService} 里，页面 0.3~0.5 秒就能画出来，
+     * 而开屏仍要硬挺 3.4 秒、再播 0.76 秒收尾 —— 实测"其实早就好了"的界面被拖到 4 秒以上。
+     * 这是启动耗时里**唯一可以不付的一笔**。
+     *
+     * <p>所以热启动只留 0.2 秒：够盖住首帧、不闪黑/白屏，又不挡路。
+     */
+    private static final long WARM_SPLASH_MIN_MS = 200L;
+    /**
+     * 热启动时"服务已就绪"那一帧停多久就揭幕（毫秒）。
+     *
+     * <p>对应的冷启动值是 {@link #READY_HOLD_MS}（500ms）—— 那个停顿是留给
+     * "100% 已就绪"读数看的；热启动本来就没有等待，再停 0.5 秒纯属拖时间。
+     */
+    private static final long WARM_READY_HOLD_MS = 120L;
     /**
      * 开屏的**硬上限**：超过这个时间无论启动到哪一步都强制收起。
      *
@@ -614,6 +657,19 @@ public class MainActivity extends Activity {
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+        /*
+         * ⚠️ "热启动还是冷启动"必须在**建任何 View 之前**定下来 ——
+         * 开屏的时长策略（{@link #splashMinMs}）依赖它，而开屏是本方法里建的。
+         *
+         * 判据：前台服务手里已经有容器地址 = 容器在跑，本次只需要把界面接回来。
+         * 这里**不做任何额外探测**（不 ping、不起线程）：getUrl() 是一个静态字段读取，
+         * 零成本；真判断错了也只影响开屏时长，不会影响正确性 ——
+         * 万一地址其实已失效，awaitUrl 会像以前一样等到新地址。
+         */
+        warmStart = DshService.getUrl() != null;
+        splashMinMs = warmStart ? WARM_SPLASH_MIN_MS : SPLASH_MIN_MS;
+        mark(warmStart ? "onCreate：热启动（容器已在跑）" : "onCreate：冷启动（要拉起容器）");
+
         // 跟随 DSH 主题：必须在建任何 View 之前设定，
         // 否则会拿到上一个页面留下的颜色。
         Ui.applyTheme(this);
@@ -1352,7 +1408,8 @@ public class MainActivity extends Activity {
         // 桌面图标的组件启用状态和设置对一次账（用户可能清过数据、或升级时被顶回默认）
         IconSwitcher.reconcile(this);
         askRegionIfNeeded("首次启动");
-        mark("onCreate 结束（界面已可见）");
+        mark("onCreate 结束（界面已可见，"
+                + (warmStart ? "热启动" : "冷启动") + "）");
     }
 
 
@@ -2635,6 +2692,17 @@ public class MainActivity extends Activity {
         appendReport("TEST 6 · proot 隔离测试（静态 busybox）\n" + t6 + "\n");
 
         r.append("TEST 7 · Phase 1a：真实 glibc 容器（Ubuntu base 24.04 arm64）\n");
+        /*
+         * ★ 首次安装的两个大下载并行（2026-11-16，用户要求"优化启动速度"）。
+         *
+         * 原来 TEST 7 下 rootfs（约 30MB）→ 解压，然后 TEST 8 才开始下 Node（约 50MB），
+         * 一次安装里两段下载**串着等**。它们互不依赖（解压也互不干扰：一个进 rootfs/，
+         * 一个进 rootfs/opt/），所以把 Node 那条丢到后台线程，
+         * 让它在 rootfs 下载/解压那几分钟里自己下完 —— 首次安装省掉一整段下载时间。
+         *
+         * 只有"确实要装"时才预取（已装好/归档已在就直接返回，见方法体）。
+         */
+        startNodePrefetch(base);
         String t7 = testContainer(base, libDir); r.append(t7).append('\n');
         appendReport("TEST 7 · Phase 1a 真实 glibc 容器\n" + t7 + "\n");
 
@@ -3487,6 +3555,126 @@ public class MainActivity extends Activity {
     static final String NODE_VERSION = "v22.23.2";
     static final String NODE_DIR = "node-" + NODE_VERSION + "-linux-arm64";
 
+    /*
+     * ── 首次安装：Node 归档的「后台预取」────────────────────────────
+     *
+     * 为什么要有（2026-11-16，用户要求"优化启动速度"）：
+     *   Ubuntu rootfs（约 30MB）和 Node（约 50MB）是两次**互不依赖**的下载，
+     *   但原来一前一后串在 TEST 7 / TEST 8 里，用户要把两段都等完。
+     *   现在 Node 那条在 rootfs 开始下载时就被丢到后台线程，
+     *   等 TEST 8 走到时它多半已经下好了 —— 首次安装少等一段完整下载。
+     *
+     * 三条硬约束（写在这里免得以后改坏）：
+     *   1. **绝不写同一个文件**：预取落到 NODE_DIR + ".prefetch"，
+     *      校验通过后由主流程 rename 成正式归档；两边永远不会同时写一个 .part。
+     *   2. **绝不能让主流程等一个后台任务**：adopt 最多等 20 秒，
+     *      等不到就放弃，主流程照老路自己下（首次安装不能被预取卡住）。
+     *   3. **失败必须安静**：预取线程里的任何异常都只写日志，
+     *      不改变主流程的判定（主流程本来就有多源重试）。
+     */
+    /** 后台预取线程（null = 当前没有在预取）。 */
+    private volatile Thread sNodePrefetch;
+    /** 预取的落地文件（成功后 rename 成正式归档）。 */
+    private volatile File sNodePrefetchFile;
+    /** 预取已被主流程放弃（等不及了）—— 线程收尾时把自己的临时文件删掉。 */
+    private volatile boolean sNodePrefetchAbandoned;
+
+    /** 预取最多让主流程等多久（毫秒）。见上面"硬约束 2"。 */
+    private static final long NODE_PREFETCH_JOIN_MS = 20000L;
+
+    /** 需要时启动 Node 归档的后台预取；不需要（已装好/归档已在/已在预取）就直接返回。 */
+    private void startNodePrefetch(File base) {
+        if (sNodePrefetch != null) return;
+        try {
+            File rootfs = new File(base, "rootfs");
+            File nodeBin = new File(rootfs, "opt/" + NODE_DIR + "/bin/node");
+            if (nodeBin.exists() && nodeBin.length() > 0) return;          // Node 已装好
+            File archive = new File(base, NODE_DIR + ".tar.gz");
+            if (archive.exists() && archive.length() >= NODE_MIN_BYTES) return;  // 归档已在
+            File tmp = new File(base, NODE_DIR + ".prefetch");
+            Env.deleteRecursively(tmp);
+            Env.deleteRecursively(new File(tmp.getAbsolutePath() + ".part"));
+            sNodePrefetchFile = tmp;
+            sNodePrefetchAbandoned = false;
+            Thread t = new Thread(() -> {
+                final File dst = tmp;
+                try {
+                    String[] urls = Region.nodeUrls(this);
+                    for (String url : urls) {
+                        if (sNodePrefetchAbandoned) return;
+                        try {
+                            appendReport("  [预取] 后台下载 Node（与 rootfs 并行）: " + url + "\n");
+                            download(url, dst, NODE_MIN_BYTES);
+                            if (dst.exists() && dst.length() >= NODE_MIN_BYTES) {
+                                appendReport("  [预取] Node 归档已下好（"
+                                        + (dst.length() >> 20) + " MB），等主流程取用\n");
+                                return;
+                            }
+                        } catch (Throwable e) {
+                            appendReport("  [预取] 该源失败: " + e.getMessage() + "\n");
+                            Env.deleteRecursively(new File(dst.getAbsolutePath() + ".part"));
+                            Env.deleteRecursively(dst);
+                        }
+                    }
+                    appendReport("  [预取] 所有源都失败 → 交给主流程自己下\n");
+                } catch (Throwable e) {
+                    Log.w(TAG, "node prefetch failed", e);
+                } finally {
+                    if (sNodePrefetchAbandoned) Env.deleteRecursively(dst);
+                }
+            }, "node-prefetch");
+            t.setDaemon(true);
+            sNodePrefetch = t;
+            t.start();
+        } catch (Throwable t) {
+            Log.w(TAG, "startNodePrefetch failed", t);
+            sNodePrefetch = null;
+            sNodePrefetchFile = null;
+        }
+    }
+
+    /**
+     * 主流程在真正要下载 Node 之前调用：把预取结果接过来（校验通过才 rename）。
+     *
+     * <p>三种结局都会安静返回，主流程接着按老逻辑走：
+     * 预取已完成 → 归档就位，主流程跳过下载；还没下完 → 最多等
+     * {@link #NODE_PREFETCH_JOIN_MS}，仍没完就作废；预取失败 → 归档不存在。
+     */
+    private void adoptNodePrefetch(File base, File archive, StringBuilder sb) {
+        final Thread t = sNodePrefetch;
+        final File tmp = sNodePrefetchFile;
+        sNodePrefetch = null;
+        sNodePrefetchFile = null;
+        if (t == null || tmp == null) return;
+        if (archive.exists() && archive.length() >= NODE_MIN_BYTES) {
+            // 正式归档已经在了（别的地方下好了）→ 预取作废，别留垃圾
+            sNodePrefetchAbandoned = true;
+            return;
+        }
+        if (t.isAlive()) {
+            try {
+                t.join(NODE_PREFETCH_JOIN_MS);
+            } catch (InterruptedException ie) {
+                Thread.currentThread().interrupt();
+            }
+        }
+        if (t.isAlive()) {
+            sNodePrefetchAbandoned = true;      // 线程收尾时自己删
+            tmp.delete();                        // 先摘掉名字，主流程不会再看见它
+            progress(sb, "  [预取] 还没下完，改由主流程自己下（不等待）\n");
+            return;
+        }
+        if (tmp.exists() && tmp.length() >= NODE_MIN_BYTES) {
+            Env.deleteRecursively(archive);
+            if (tmp.renameTo(archive)) {
+                progress(sb, "  [预取] 直接使用后台已下好的 Node 归档（"
+                        + (archive.length() >> 20) + " MB）→ 跳过本次下载\n");
+                return;
+            }
+        }
+        Env.deleteRecursively(tmp);
+    }
+
     /** TEST 8：在容器里装上 Node.js（官方 arm64 glibc 构建）。 */
     private String testNode(File base, File rootfs, String libDir, StringBuilder sb) {
         try {
@@ -3496,6 +3684,12 @@ public class MainActivity extends Activity {
                 if (space != null) return fail(sb, space);
 
                 File archive = new File(base, NODE_DIR + ".tar.gz");
+                /*
+                 * 先把后台预取的结果接过来（若已经下好了，下面这段就是"归档已就位、跳过下载"）。
+                 * 必须在"归档偏小就丢掉"之前——预取文件是独立的临时文件，
+                 * 只有校验通过才会被 rename 成正式归档。
+                 */
+                adoptNodePrefetch(base, archive, sb);
                 // 体积不对的归档直接丢掉：半截包解出来的 Node 是坏的
                 if (archive.exists() && archive.length() < NODE_MIN_BYTES) {
                     progress(sb, "  ⚠️ 本地 Node 归档偏小（" + archive.length()
@@ -3819,6 +4013,15 @@ public class MainActivity extends Activity {
      */
     private static final long READY_HOLD_MS = 500L;
 
+    /**
+     * 等待容器地址时，**界面**读数最多多久更新一次（毫秒）。
+     *
+     * <p>轮询本身是 100ms 一次（见 {@link #awaitUrl(String)}，那是为了尽快发现地址），
+     * 但状态栏文字的刷新按这个节流 —— 每秒两次足够看出"在动"，
+     * 又不会让主线程变成高频重排。
+     */
+    private static final long AWAIT_UI_TICK_MS = 500L;
+
     private void onServerReady(String url) {
         runOnUiThread(() -> {
             statusBar.setText("DSH 运行中 · 127.0.0.1:" + Env.DSH_PORT);
@@ -3899,14 +4102,27 @@ public class MainActivity extends Activity {
 
             // ② 让"已就绪"先停一下，再开始倒放
             final long shown = SystemClock.uptimeMillis() - splashShownAt;
-            final long wait = Math.max(READY_HOLD_MS, SPLASH_MIN_MS - shown);
+            final long wait = Math.max(warmStart ? WARM_READY_HOLD_MS : READY_HOLD_MS,
+                    splashMinMs - shown);
             final Runnable endFinish = () -> {
                 endingDone[0] = true;
                 tryReveal[0].run();
             };
-            v.postDelayed(() -> v.collapse(endFinish), wait);
-            // 兜底 1：收尾回调万一没来，也当它播完了
-            v.postDelayed(endFinish, wait + 1800);
+            if (warmStart) {
+                /*
+                 * 热启动：**不播收尾倒放**。
+                 *
+                 * 倒放（直角→矩形→空心线→点）是给"从容器启动到界面就绪"那段等待收的尾；
+                 * 热启动压根没有等待，播它只会让本来 0.4 秒就能用的界面多等 0.76 秒。
+                 * 所以这里只等一小下（WARM_READY_HOLD_MS）就直接揭幕，
+                 * 由 dismissSplash() 用 260ms 淡出把开屏收掉 —— 视觉上仍是"平滑接棒"。
+                 */
+                v.postDelayed(endFinish, wait);
+            } else {
+                v.postDelayed(() -> v.collapse(endFinish), wait);
+                // 兜底 1：收尾回调万一没来，也当它播完了
+                v.postDelayed(endFinish, wait + 1800);
+            }
             // 兜底 2：页面迟迟不加载完（白屏/失败），绝不把开屏卡成永久封面
             v.postDelayed(() -> {
                 pageOk[0] = true;
@@ -3963,7 +4179,13 @@ public class MainActivity extends Activity {
             }
         }
         long shown = SystemClock.uptimeMillis() - splashShownAt;
-        long wait = Math.max(0L, SPLASH_MIN_MS - shown);
+        /*
+         * 用 splashMinMs 而不是 SPLASH_MIN_MS：热启动的最短时长是 0.2 秒
+         * （见 WARM_SPLASH_MIN_MS）。这里原来硬编码 3.4 秒，等于**绕过**了
+         * onServerReady 里那套热启动短路 —— 界面会先揭幕、再被开屏盖回去
+         * 整整 3 秒多，等于热启动优化白做。
+         */
+        long wait = Math.max(0L, splashMinMs - shown);
         Runnable hide = () -> {
             try {
                 v.animate().alpha(0f).setDuration(260).withEndAction(() -> {
@@ -5329,43 +5551,64 @@ public class MainActivity extends Activity {
      *                    所以必须等一个**不同的** URL，否则会立刻把旧页面当成新的。
      */
     private void awaitUrl(String previousUrl) {
-        long t0 = System.currentTimeMillis();
-        for (int i = 0; i < 240; i++) {
+        final long t0 = System.currentTimeMillis();
+        /*
+         * ★ 轮询间隔从 1000ms 改成 100ms（2026-11-16，用户要求"优化启动速度"）。
+         *
+         * 这个循环等的是"前台服务把 dsh 的地址解析出来"这件事，而**它不会提前通知**：
+         * 以前每秒看一眼，于是地址在第 10.11 秒就绪、界面却要到第 11.0 秒才开始加载 ——
+         * 平均白等 0.5 秒、最坏 1 秒，全都算在用户头上。
+         *
+         * 100ms 的代价可以忽略：循环体只是读一个 volatile 静态字段 + 一次时间比较，
+         * 真正的 UI 更新仍然按 {@link #AWAIT_UI_TICK_MS} 节流（见下），
+         * 所以不会变成"每秒重排十次界面"。
+         */
+        final long POLL_MS = 100L;
+        final long TIMEOUT_MS = 240_000L;      // 4 分钟（与原来 240 圈 × 1 秒等价）
+        long lastUiAt = 0L;
+        while (true) {
             String u = DshService.getUrl();
             if (u != null && !u.equals(previousUrl)) {
                 dshUrl = u;
+                mark("awaitUrl 拿到地址（自等待起 "
+                        + (System.currentTimeMillis() - t0) + "ms）");
                 onServerReady(u);
                 appendReport("  ✅ 服务就绪（前台服务）: " + u + "\n");
                 return;
             }
+            final long el = System.currentTimeMillis() - t0;
             /*
              * 20 秒还没看到前台服务被创建，就不用再等 4 分钟了 ——
              * 这说明 startForegroundService 根本没生效（被系统拦截），
              * 直接给出确切原因，比笼统的"超时"有用得多。
+             * （判据从"第 20 圈"改成"20 秒"，这样轮询间隔改了也不会失灵。）
              */
-            if (i == 20 && !DshService.isCreated()) {
+            if (el >= 20_000L && !DshService.isCreated()) {
                 onProvisionFailed(new IllegalStateException(
                         "前台服务没有启动起来（系统可能拦截了后台服务）。\n"
                       + "   · 请到系统设置里允许本应用「自启动 / 后台运行」后点「重试」"));
                 return;
             }
+            if (el >= TIMEOUT_MS) break;
             /*
-             * ★ 每一圈都要上报进度（不能只在 i%5==4 时上报）。
+             * ★ 进度要"平滑推进"，但**不必每 100ms 都碰界面**。
              *
-             * 踩过的坑：进度原来放在 `if (i % 5 == 4)` 里 —— 也就是**每 5 秒才更新一次**。
-             * 帧号由进度算出，于是画面每 5 秒才跳一格，中间几秒完全静止，用户看到的就是
-             * 「动画完全卡住了」（真机日志确认：帧号连续 3~4 秒不变）。
-             * 现在每圈（1 秒）都报，并且把总跨度按最坏等待时间（240 秒）来分配，
-             * 让它**平滑推进**而不是几步跳完。
+             * 踩过的坑：进度原来放在 `if (i % 5 == 4)` 里（每 5 秒一次）——
+             * 帧号由进度算出，于是画面每 5 秒才跳一格，中间几秒完全静止，
+             * 用户看到的就是"动画完全卡住了"。现在按**时间**节流：
+             * 每 500ms 更新一次读数，帧本身由开屏视图自己的 60fps 心跳推进。
+             *
+             * 总跨度仍按最坏等待时间（4 分钟）分配，让它一直是"在动"而不是跳着走。
              */
-            splashProgress(0.35f + 0.64f * Math.min(1f, (i + 1) / 240f));
-            if (i % 5 == 4) {
+            if (el - lastUiAt >= AWAIT_UI_TICK_MS) {
+                lastUiAt = el;
+                splashProgress(0.35f + 0.64f * Math.min(1f, el / (float) TIMEOUT_MS));
                 final String st = DshService.getState();
-                final long el = System.currentTimeMillis() - t0;
+                final long elForUi = el;
                 runOnUiThread(() -> statusBar.setText(
-                        "Tdsh · " + st + "（已 " + fmtDuration(el) + "）"));
+                        "Tdsh · " + st + "（已 " + fmtDuration(elForUi) + "）"));
             }
-            try { Thread.sleep(1000); } catch (InterruptedException e) { return; }
+            try { Thread.sleep(POLL_MS); } catch (InterruptedException e) { return; }
         }
         /*
          * 超时不能是死胡同。

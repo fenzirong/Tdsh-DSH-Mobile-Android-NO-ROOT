@@ -76,7 +76,6 @@ public class TdshSplashView extends View {
 
     // 关键 y（与预览版一致）
     private static final float Y_LOCKUP = 172f;
-    private static final float Y_TESS = 378f;
     private static final float Y_RULER = 556f;
     private static final float Y_READ = 652f;
     private static final float Y_GRID = 678f;
@@ -139,6 +138,41 @@ public class TdshSplashView extends View {
     private long collapseStart = 0L;
     private Runnable collapseCb;
 
+    /**
+     * 生长分镜（点→线→面）走完的时刻（毫秒，相对 {@link #startAt}）。
+     *
+     * <p>= T_DOT + T_LINE + T_FACE（0.55 + 1.00 + 1.65 → 以代码里的常量为准，见下）。
+     * 这之后画面里唯一还在动的是那颗旋转的立方体，几何本身已经定型。
+     */
+    private static final long STORY_MS = 1650L;
+    /**
+     * "等待阶段"的重绘间隔（毫秒）—— 约 24fps。
+     *
+     * <h3>为什么要限帧（2026-11-16，用户要求"优化启动速度"）</h3>
+     * 这个开屏在**整个容器启动期间**（实测 8~12 秒）都以 60fps 全屏重绘。
+     * 但分镜头 1.65 秒就播完了，之后画面上只剩一颗**慢速旋转**的线框立方体
+     * （0.55π rad/s ≈ 1.1 秒半圈）—— 也就是说，后面 8 秒里每秒 60 次全屏重绘，
+     * 画的全是"几乎看不出差别"的帧。
+     *
+     * <p>而这 8 秒恰好是容器里 node 加载几百个插件、最吃 CPU 的时候：
+     * 开屏的重绘线程在跟它抢同一个 CPU/GPU。真机上的表现就是
+     * "启动时手机明显发热、且越热越慢"。
+     *
+     * <p>24fps 对这条旋转线框来说观感与 60fps 无差别（一帧转不到 3°），
+     * 但把这块的绘制开销砍掉一半以上。**分镜与收尾仍然是逐帧 60fps** ——
+     * 用户真正会盯着看的那两段一点没变。
+     */
+    /**
+     * 逐帧心跳是否正在跑。
+     *
+     * <p>等待期它会变成 false（分镜播完就停，见 {@link #startTicker()}），
+     * 收尾开始时再变回 true —— 这样"要不要请求下一帧"是个明确的状态，
+     * 而不是靠"每帧都醒来判断一下"。
+     */
+    private boolean ticking = false;
+    /** 上一帧是在什么时刻画的（诊断用）。 */
+    private long lastFrameAt = 0L;
+
 
     public TdshSplashView(Context c) { super(c); init(); }
     public TdshSplashView(Context c, AttributeSet a) { super(c, a); init(); }
@@ -149,17 +183,54 @@ public class TdshSplashView extends View {
         setClickable(true);
         setFocusable(false);
         startAt = SystemClock.uptimeMillis();
-        /*
-         * 60fps 心跳驱动重绘。画成什么样完全由 elapsed time 算出来（不依赖
-         * ValueAnimator 的插值值），所以任何一帧都能独立求出，偶发掉帧只是少画几帧，
-         * 不会让动画变形或错位。
-         */
+        startTicker();
+    }
+
+    /**
+     * 启动"逐帧重绘"心跳。
+     *
+     * <p>画成什么样完全由 elapsed time 算出来（不依赖 ValueAnimator 的插值值），
+     * 所以任何一帧都能独立求出，偶发掉帧只是少画几帧，不会让动画变形或错位。
+     *
+     * <h3>为什么心跳要能停（2026-11-16）</h3>
+     * 分镜只有前 {@link #STORY_MS} 毫秒在动（点→线→面→直角），收尾那一千多毫秒在动；
+     * 中间那段**等待容器启动**的时间（实测 8~12 秒）原本靠"旋转立方体"撑着，
+     * 而用户明确要求去掉那颗立方体 —— 于是等待期画面上**没有任何东西在动**。
+     * 这时还每秒请求 60 次全屏重绘，就是拿手机的电和 CPU 去画同一张图，
+     * 偏偏那几秒正是容器里 node 加载几百个插件最吃 CPU 的时候。
+     *
+     * <p>所以：分镜播完就 {@link #cancelTicker()}，等待期的画面更新改为
+     * "进度变了才画"（{@link #setProgress} 自己会 invalidate），
+     * 收尾开始时再 {@link #startTicker()} 恢复逐帧。
+     */
+    private void startTicker() {
+        if (stopped || ticking) return;
+        ticking = true;
         anim = ValueAnimator.ofFloat(0f, 1f);
         anim.setDuration(1000);
         anim.setRepeatCount(ValueAnimator.INFINITE);
         anim.setInterpolator(new LinearInterpolator());
-        anim.addUpdateListener(a -> { if (!stopped) invalidate(); });
+        anim.addUpdateListener(a -> {
+            if (stopped) return;
+            if (!collapsing && SystemClock.uptimeMillis() - startAt >= STORY_MS) {
+                // 分镜播完、又没有收尾要播 → 画面静止，心跳到此为止
+                cancelTicker();
+                return;
+            }
+            lastFrameAt = SystemClock.uptimeMillis();
+            invalidate();
+        });
         anim.start();
+    }
+
+    /** 停掉逐帧心跳（幂等）。注意与 {@link #stopAnimating()} 的区别：那个是"这层开屏作废了"。 */
+    private void cancelTicker() {
+        ticking = false;
+        final ValueAnimator a = anim;
+        anim = null;
+        try {
+            if (a != null) a.cancel();
+        } catch (Throwable ignore) { }
     }
 
     /** 按 DSH 内定主题（外部通过 {@link #setLightTheme} 告知）或系统明暗选配色。 */
@@ -202,12 +273,7 @@ public class TdshSplashView extends View {
      */
     public void stopAnimating() {
         stopped = true;
-        try {
-            if (anim != null) {
-                anim.cancel();
-                anim = null;
-            }
-        } catch (Throwable ignore) { }
+        cancelTicker();
     }
 
     @Override
@@ -248,6 +314,8 @@ public class TdshSplashView extends View {
         collapseCb = onDone;
         collapsing = true;
         collapseStart = SystemClock.uptimeMillis();
+        // 收尾是逐帧倒放 —— 若等待期已经把心跳停掉了，这里必须重新拉起来
+        startTicker();
         postInvalidateOnAnimation();
     }
 
@@ -365,6 +433,7 @@ public class TdshSplashView extends View {
                  * 真机日志里那条 t=10.941（收尾已到 0 之后又跳回满画面）就是它。
                  */
                 stopped = true;
+                cancelTicker();          // 画面已收完，心跳没必要再跑
                 final Runnable cb = collapseCb;
                 collapseCb = null;
                 if (cb != null) post(cb);
@@ -424,7 +493,13 @@ public class TdshSplashView extends View {
              * 几何才开始往回缩，两者在时间上完全不重叠。
              */
             drawLockup(cv, clamp((inA - 0.05f) / 0.30f) * fadeA);
-            drawTesseract(cv, cx, Y_TESS, 50f * clamp((inA - 0.12f) / 0.40f) * fadeA, t);
+            /*
+             * 原来这里画一颗随 t 旋转的四维超立方体，并在它体内写 "Tdsh"。
+             * 用户明确要求去掉（2026-11-16）：等待期那颗一直在转的线框，
+             * 是开屏上**唯一**持续动的东西 —— 去掉之后等待期画面是静止的，
+             * 于是整个 60fps 心跳都能停掉（见 init()/startTicker() 的注释），
+             * 容器启动那 8~12 秒不再和 node 抢 CPU。
+             */
             drawRuler(cv, clamp((inA - 0.40f) / 0.30f) * fadeA);
             drawBottom(cv, clamp((inA - 0.50f) / 0.35f) * fadeA);
         }
@@ -609,84 +684,6 @@ public class TdshSplashView extends View {
             whaleBmpLight = inv;
         } catch (Throwable t) {
             android.util.Log.w("DSH_SPLASH", "鲸鱼图标解码失败（不画徽标，不影响启动）", t);
-        }
-    }
-
-    // ── 四维超立方体（16 顶点 / 32 棱，与预览版同一套几何）──
-    private static final float[][] TV = buildV();
-    private static final int[][] TE = buildE();
-
-    private static float[][] buildV() {
-        final float[][] v = new float[16][4];
-        for (int i = 0; i < 16; i++) {
-            v[i][0] = (i & 1) == 0 ? -1f : 1f;
-            v[i][1] = ((i >> 1) & 1) == 0 ? -1f : 1f;
-            v[i][2] = ((i >> 2) & 1) == 0 ? -1f : 1f;
-            v[i][3] = ((i >> 3) & 1) == 0 ? -1f : 1f;
-        }
-        return v;
-    }
-
-    private static int[][] buildE() {
-        final java.util.ArrayList<int[]> e = new java.util.ArrayList<>();
-        for (int i = 0; i < 16; i++) {
-            for (int j = i + 1; j < 16; j++) {
-                int d = 0;
-                for (int k = 0; k < 4; k++) if (TV[i][k] != TV[j][k]) d++;
-                if (d == 1) e.add(new int[]{i, j});
-            }
-        }
-        return e.toArray(new int[0][]);
-    }
-
-    /**
-     * 画四维超立方体，并把 Tdsh 写在**体内**。
-     * 图层顺序：下层细棱线 → 中层 Tdsh（黑体、平直笔画、无描边/阴影）→
-     * 上层粗棱线再叠一遍（线条自然遮住笔画）→ 顶点方点。
-     */
-    private void drawTesseract(Canvas cv, float cx, float cy, float scale, float t) {
-        if (scale <= 0.5f) return;
-        final float a1 = t * 0.55f * (float) Math.PI;
-        final float a2 = t * 0.55f * (float) Math.PI * 0.63f + 0.9f;
-        final float c1 = (float) Math.cos(a1), s1 = (float) Math.sin(a1);
-        final float c2 = (float) Math.cos(a2), s2 = (float) Math.sin(a2);
-        final float d4 = 4.6f, d3 = 7.2f;
-
-        final float[] px = new float[16], py = new float[16], dep = new float[16];
-        for (int i = 0; i < 16; i++) {
-            final float x = TV[i][0], y = TV[i][1], z = TV[i][2], w = TV[i][3];
-            float x1 = x * c1 - w * s1; final float w1 = x * s1 + w * c1;
-            float y1 = y * c2 - z * s2; final float z1 = y * s2 + z * c2;
-            final float f = d4 / (d4 + w1);
-            x1 *= f; y1 *= f;
-            final float zz = z1 * f;
-            final float g = d3 / (d3 + zz);
-            px[i] = cx + x1 * scale * g;
-            py[i] = cy + y1 * scale * g;
-            dep[i] = Math.abs(x1) + Math.abs(y1) + Math.abs(zz);
-        }
-
-        p.setStyle(Paint.Style.STROKE);
-        p.setColor(cINK);
-        p.setStrokeWidth(0.55f);
-        for (int[] e : TE) cv.drawLine(px[e[0]], py[e[0]], px[e[1]], py[e[1]], p);
-
-        text.setTypeface(tfBold);
-        text.setTextSize(scale * 0.62f);
-        text.setTextAlign(Paint.Align.CENTER);
-        text.setColor(cINK);
-        cv.drawText("Tdsh", cx, cy + scale * 0.24f, text);
-        text.setTextAlign(Paint.Align.LEFT);
-
-        for (int[] e : TE) {
-            p.setStrokeWidth((dep[e[0]] + dep[e[1]]) < 3.4f ? 1.35f : 0.85f);
-            cv.drawLine(px[e[0]], py[e[0]], px[e[1]], py[e[1]], p);
-        }
-
-        p.setStyle(Paint.Style.FILL);
-        p.setColor(cINK);
-        for (int i = 0; i < 16; i++) {
-            cv.drawRect(px[i] - 1.1f, py[i] - 1.1f, px[i] + 1.1f, py[i] + 1.1f, p);
         }
     }
 

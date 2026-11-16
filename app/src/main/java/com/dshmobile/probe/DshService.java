@@ -720,35 +720,156 @@ public class DshService extends Service {
             final long tBoot = System.currentTimeMillis();
 
             /*
-             * 先把「桌宠」插件摘掉（2026-10-21）：它的显示层已经被删了，
-             * 留在容器里只会每 100~200ms 写一次请求文件穿 proot，纯烧电。
-             * 幂等：摘干净之后这里每次都返回 null。
+             * ── 启动前置工作：**并行**做（2026-11-16，用户要求"优化启动速度"）──
+             *
+             * 下面这几件事互不依赖，但以前是一件一件串着做的 —— 而每一件都要碰
+             * 手机存储（写 proot 和两个 .so、写 6 个插件目录、mkdir 共享存储、
+             * 扫一遍 /proc），真机上单项几十到几百毫秒。串起来就是：
+             * "容器还没开始起，用户已经白等了几百毫秒"。
+             *
+             * 依赖关系只有两条，所以分成四组：
+             *   A. proot 本体（{@code prepareProot}）—— 起容器、装 pnpm 都要它；
+             *   B. 手机控制桥 + 容器里的 phone CLI / token —— 独立的资产拷贝；
+             *   C. profile 里的插件（摘桌宠 + 装自带插件）—— **两者都改同一个
+             *      package.json**，所以必须放进同一个任务里串行，不能拆成两个并行；
+             *   D. 挂载点与工作区（mkdir /sdcard/dsh）—— 独立。
+             *
+             * 所有组都在本线程 join 完才往下走，因此"起 dsh 之前容器与 profile
+             * 一定已经就绪"这个前提**没有被改变** —— 只是把等待时间叠在一起了。
              */
-            try {
-                String petMsg = Env.disablePetPlugin(base);
-                if (petMsg != null) {
-                    Log.i(TAG, petMsg);
-                    appendReport("  · " + petMsg + "\n");
+            final java.util.concurrent.ExecutorService pool =
+                    java.util.concurrent.Executors.newFixedThreadPool(4, r -> {
+                        Thread t = new Thread(r, "dsh-preflight");
+                        t.setDaemon(true);
+                        return t;
+                    });
+            final java.util.concurrent.atomic.AtomicReference<String> libDirRef =
+                    new java.util.concurrent.atomic.AtomicReference<>();
+            final java.util.concurrent.atomic.AtomicReference<String> tokenDirRef =
+                    new java.util.concurrent.atomic.AtomicReference<>();
+            final java.util.concurrent.atomic.AtomicReference<String> wsRef =
+                    new java.util.concurrent.atomic.AtomicReference<>();
+            /** 各组的日志，按组收好后再按固定顺序写报告 —— 免得并行日志互相穿插。 */
+            final java.util.List<String> preflightLog =
+                    java.util.Collections.synchronizedList(new java.util.ArrayList<String>());
+            final long[] msOf = {0L, 0L, 0L, 0L};   // A proot / B 手机桥 / C 插件 / D 挂载点
+
+            /* A. proot 本体 + 依赖库 + loader（后面起容器、装 pnpm 都用 libDir） */
+            java.util.concurrent.Future<?> fA = pool.submit(() -> {
+                long t = System.currentTimeMillis();
+                try {
+                    libDirRef.set(Env.prepareProot(DshService.this, base));
+                } catch (Throwable e) {
+                    preflightLog.add("  · ⚠️ proot 准备失败: " + e + "\n");
+                    Log.w(TAG, "prepareProot 失败", e);
+                } finally {
+                    msOf[0] = System.currentTimeMillis() - t;
                 }
-            } catch (Throwable t) {
-                Log.w(TAG, "摘桌宠插件异常", t);
+            });
+
+            /* B. 手机控制桥（token 目录随后只读绑定进容器）+ 容器里的 phone CLI / AGENTS.md */
+            java.util.concurrent.Future<?> fB = pool.submit(() -> {
+                long t = System.currentTimeMillis();
+                try {
+                    PhoneBridge.start(DshService.this);
+                    tokenDirRef.set(PhoneBridge.tokenDir(DshService.this));
+                    Env.installPhoneTools(DshService.this, base);
+                    Log.i(TAG, "手机控制桥 token 目录: " + tokenDirRef.get()
+                            + " · 白名单 " + PhoneBridge.allowed(DshService.this).size() + " 个应用");
+                } catch (Throwable e) {
+                    preflightLog.add("  · ⚠️ 手机控制桥/phone CLI 失败: " + e + "\n");
+                    Log.w(TAG, "手机控制前置失败", e);
+                } finally {
+                    msOf[1] = System.currentTimeMillis() - t;
+                }
+            });
+
+            /* C. profile 里的插件：摘桌宠 + 装自带插件（同改 package.json → 必须串行） */
+            java.util.concurrent.Future<?> fC = pool.submit(() -> {
+                long t = System.currentTimeMillis();
+                try {
+                    /*
+                     * 先把「桌宠」插件摘掉（2026-10-21）：它的显示层已经被删了，
+                     * 留在容器里只会每 100~200ms 写一次请求文件穿 proot，纯烧电。
+                     * 幂等：摘干净之后这里每次都返回 null。
+                     */
+                    try {
+                        String petMsg = Env.disablePetPlugin(base);
+                        if (petMsg != null) {
+                            Log.i(TAG, petMsg);
+                            preflightLog.add("  · " + petMsg + "\n");
+                        }
+                    } catch (Throwable e) {
+                        Log.w(TAG, "摘桌宠插件异常", e);
+                    }
+                    /*
+                     * 装随 APK 自带的 DSH 插件（phone 工具集）。
+                     *
+                     * 放在起 dsh 之前：插件是 bundle，要靠 profile 启动时加载 ——
+                     * 起完再装的话本次会话看不到那些工具，用户会以为没生效。
+                     * 幂等（已装过就跳过一次文件读），所以只在首次/升级后真解包。
+                     * 失败也不阻断启动：phone CLI 那条路还在，功能不会全丢。
+                     */
+                    /*
+                     * 注意：这里传的 tokenDir / libDir 可能是 null —— 本组与 A、B 组并行，
+                     * 那时它们可能还没算出来。{@code installPhonePlugin} 只按包名解 tgz
+                     * 并改 profile 的 package.json，**从头到尾不碰这两个参数**
+                     * （它只写 rootfs/root/.dsh/profiles/web/），所以传 null 是安全的；
+                     * 万一将来这个方法开始用它们，编译期/自检会立刻暴露出来。
+                     */
+                    String pluginLog = Env.installPhonePlugin(DshService.this, base, null, null);
+                    Log.i(TAG, pluginLog);
+                    preflightLog.add("  " + pluginLog + "\n");
+                } catch (Throwable e) {
+                    preflightLog.add("  · ⚠️ 装自带插件异常: " + e + "\n");
+                    Log.w(TAG, "装自带插件异常", e);
+                } finally {
+                    msOf[2] = System.currentTimeMillis() - t;
+                }
+            });
+
+            /* D. 共享存储挂载点 + 工作区（/sdcard/dsh） */
+            java.util.concurrent.Future<?> fD = pool.submit(() -> {
+                long t = System.currentTimeMillis();
+                try {
+                    wsRef.set(Env.ensureStorageMounts(base));
+                } catch (Throwable e) {
+                    preflightLog.add("  · ⚠️ 挂载点/工作区准备失败: " + e + "\n");
+                    Log.w(TAG, "ensureStorageMounts 失败", e);
+                } finally {
+                    msOf[3] = System.currentTimeMillis() - t;
+                }
+            });
+
+            /*
+             * 等四组都结束。上限给 2 分钟：这些操作正常是毫秒级/百毫秒级，
+             * 超时只可能是因为存储异常 —— 超时也**继续往下走**（和以前一样：
+             * 这些前置失败不阻断启动），但日志里会明写是谁超时了。
+             */
+            java.util.concurrent.Future<?>[] groups = {fA, fB, fC, fD};
+            String[] groupName = {"proot", "手机控制桥", "自带插件", "挂载点/工作区"};
+            for (int i = 0; i < groups.length; i++) {
+                try {
+                    groups[i].get(120, java.util.concurrent.TimeUnit.SECONDS);
+                } catch (Throwable e) {
+                    preflightLog.add("  · ⚠️ 前置任务「" + groupName[i] + "」未按时完成: "
+                            + e.getClass().getSimpleName() + "\n");
+                    Log.w(TAG, "前置任务超时/失败: " + groupName[i], e);
+                }
             }
+            pool.shutdownNow();
 
-            // 先准备好共享存储挂载点与测试文件夹（工作区）
-            String ws = Env.ensureStorageMounts(base);
+            String libDir = libDirRef.get();
+            if (libDir == null) libDir = new File(base, "lib").getAbsolutePath();   // 兜底：与旧行为一致
+            String tokenDir = tokenDirRef.get();
+            if (tokenDir == null) tokenDir = PhoneBridge.tokenDir(this);
+            String ws = wsRef.get();
             Log.i(TAG, "工作区: " + Env.WORKSPACE + " · 测试文件夹: " + ws);
-            appendReport("  · [启动] 挂载点/工作区 " + (System.currentTimeMillis() - tBoot) + "ms\n");
+            appendReport("  · [启动] 前置并行完成 " + (System.currentTimeMillis() - tBoot)
+                    + "ms（proot " + msOf[0] + " · 手机桥 " + msOf[1]
+                    + " · 插件 " + msOf[2] + " · 挂载点 " + msOf[3] + "，最慢的一组算总耗时）\n");
+            for (String line : preflightLog) appendReport(line);
 
-            // 手机控制：启动回环控制桥（token 目录随后只读绑定进容器），
-            // 并把 phone CLI 与 AGENTS.md 装进容器/工作区
-            PhoneBridge.start(this);
-            String tokenDir = PhoneBridge.tokenDir(this);
-            Env.installPhoneTools(this, base);
-            Log.i(TAG, "手机控制桥 token 目录: " + tokenDir
-                    + " · 白名单 " + PhoneBridge.allowed(this).size() + " 个应用");
-            appendReport("  · [启动] 手机控制桥 " + (System.currentTimeMillis() - tBoot) + "ms\n");
-
-            String libDir = Env.prepareProot(this, base);
             String apiKey = getApiKey(this);
             /*
              * 把 Key 的**形态**记进报告（不含密钥本身）。
@@ -759,28 +880,21 @@ public class DshService extends Service {
              * {@link ApiKey#plausible} 的形态警告，同类问题不用再猜。
              */
             appendReport("  · API Key：" + ApiKey.describe(apiKey) + "\n");
-            appendReport("  · [启动] proot 就绪 " + (System.currentTimeMillis() - tBoot) + "ms\n");
 
             /*
-             * 装随 APK 自带的 DSH 插件（phone 工具集）。
-             *
-             * 放在起 dsh 之前：插件是 bundle，要靠 profile 启动时加载 ——
-             * 起完再装的话本次会话看不到那些工具，用户会以为没生效。
-             * 幂等（已装过就跳过一次文件读），所以只在首次/升级后跑一次。
-             * 失败也不阻断启动：phone CLI 那条路还在，功能不会全丢。
+             * 插件市场的前置条件：容器里得有 pnpm（dsh plugin add 内部要用）。
+             * 这一条**不参与并行**：它真要装的时候会在容器里跑 npm（可能几十秒），
+             * 和"起 dsh"抢同一个 rootfs 的写权限不合适；而且它已装好时只是一次
+             * 文件存在性检查，几毫秒。
              */
             try {
-                String pluginLog = Env.installPhonePlugin(this, base, tokenDir, libDir);
-                Log.i(TAG, pluginLog);
-                appendReport("  " + pluginLog + "\n");
-                // 插件市场的前置条件：容器里得有 pnpm（dsh plugin add 内部要用）
                 String pnpmLog = Env.ensurePnpm(base, tokenDir, libDir);
                 Log.i(TAG, pnpmLog);
                 appendReport("  " + pnpmLog + "\n");
             } catch (Throwable t) {
-                Log.w(TAG, "装自带插件异常", t);
+                Log.w(TAG, "pnpm 检查异常", t);
             }
-            appendReport("  · [启动] 自带插件+pnpm " + (System.currentTimeMillis() - tBoot) + "ms\n");
+            appendReport("  · [启动] pnpm 检查 " + (System.currentTimeMillis() - tBoot) + "ms\n");
 
             /*
              * 中转站（自定义提供方）的密钥作为环境变量进容器。

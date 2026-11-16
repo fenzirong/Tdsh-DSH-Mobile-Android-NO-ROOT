@@ -107,7 +107,16 @@ public class TdshSplashView extends View {
      * 真正被切断的原因是揭幕抢跑，那一条在 MainActivity.onServerReady 里
      * 用 pageOk / endingDone 双条件修掉了。
      */
-    private static final long COLLAPSE_MS = 1150L;
+    /*
+     * 2026-11-16：1150ms → **600ms**。
+     *
+     * 这一段在冷启动里是**纯等待**：页面早在服务就绪后 0.3~0.5 秒就画好了
+     * （onPageFinished 一到就已 pageOk），而揭幕还要等收尾倒放播完。
+     * 也就是说倒放后面那几百毫秒，遮住的是一个**已经画好的界面**。
+     * 用户要求"启动等待尽可能短"→ 压到 600ms：倒放的形态仍然完整
+     * （几何倒回去 + 文字前 25% 淡出），只是快了一倍。
+     */
+    private static final long COLLAPSE_MS = 600L;
     /** 收尾时"文字/读数"在整段收尾的前多少比例内淡出干净（之后才轮到几何往回缩）。 */
     private static final float CONTENT_FADE_OUT = 0.25f;
 

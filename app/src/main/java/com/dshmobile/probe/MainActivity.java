@@ -4009,9 +4009,13 @@ public class MainActivity extends Activity {
      * <p>为什么要专门停这一下（用户要求）：原来是在 {@link #onServerReady} 里
      * 直接让 WebView 变可见 + 载入页面，然后才想起播收尾 —— 页面一瞬间就盖在
      * 开屏上面，**收尾那段倒放（直角→矩形→空心线→点）根本来不及被看见**。
-     * 现在：先让读数停在「已就绪 100%」半秒，再播收尾，收尾播完才把页面交出来。
+     *
+     * <p>2026-11-16 从 500ms 收到 **120ms**（用户要求"启动等待尽可能短"）：
+     * 这个停顿的唯一作用是让"100% / 已就绪"那行读数被看清，而它并不会被省掉 ——
+     * 收尾倒放的前 25% 本来就在做同一件事（{@code CONTENT_FADE_OUT}）。
+     * 多停的 380ms 是纯粹的干等。
      */
-    private static final long READY_HOLD_MS = 500L;
+    private static final long READY_HOLD_MS = 120L;
 
     /**
      * 等待容器地址时，**界面**读数最多多久更新一次（毫秒）。

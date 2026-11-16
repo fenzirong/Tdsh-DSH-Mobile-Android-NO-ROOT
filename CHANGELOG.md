@@ -109,7 +109,7 @@
 两处合计省 **≈0.9 秒**。它们不影响分镜（"点→线→面"仍是 1.65 秒完整播放），
 只砍掉"页面早就能用了、动画还在前面挡着"的那一段。
 
-### ⑨ 容器提前到 Application 里启动
+### ⑧ 容器提前到 Application 里启动
 
 原来容器要等 `MainActivity.onCreate` 把整套界面搭完（真机 100~300ms），
 再由初始化线程 `startWebAndWait() → startDshService()` 拉起来。

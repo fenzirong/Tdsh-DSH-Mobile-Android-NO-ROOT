@@ -109,6 +109,47 @@ jobs:
           sha256sum "Tdsh-${VERSION}.apk" > SHA256SUMS.txt
           cat SHA256SUMS.txt
 
+      # 发布说明：直接从 CHANGELOG.md 里抠出**这一版**那一节。
+      #
+      # 为什么不用 action 自动生成的 notes：那只是一串 commit 标题，
+      # 而本项目的 CHANGELOG 才是给用户看的（每版都写了"改了什么、为什么、怎么验证"）。
+      # 少维护一份 release notes，也就不会出现"发布页和 CHANGELOG 说法不一致"。
+      - name: Extract release notes from CHANGELOG
+        run: |
+          set -euo pipefail
+          mkdir -p release
+          python3 - "${VERSION#v}" <<'PYEOF' > release/RELEASE_NOTES.md
+          import os, re, sys
+          ver = sys.argv[1]
+          text = open('CHANGELOG.md', encoding='utf-8').read()
+          # 章节标题形如 "## v0.4.11-fz1"；取到下一个 "## " 之前
+          pat = re.compile(r'^## +v?' + re.escape(ver) + r'\s*$', re.M)
+          m = pat.search(text)
+          if not m:
+              print("（本版没有在 CHANGELOG.md 里找到 v%s 小节，以下是完整更新日志链接。）" % ver)
+              print()
+              print("https://github.com/%s/blob/main/CHANGELOG.md" % os.environ.get('GITHUB_REPOSITORY', ''))
+              sys.exit(0)
+          rest = text[m.end():]
+          nxt = re.search(r'^## ', rest, re.M)
+          body = rest[:nxt.start()] if nxt else rest
+          print(body.strip())
+          PYEOF
+          # 正文顶部补一句"装哪个文件、怎么装"
+          {
+            echo "## 安装"
+            echo
+            echo "- 下载下面的 \`Tdsh-${VERSION#v}.apk\`，传到手机上点击安装（仅 arm64，Android 7.0+）。"
+            echo "- 与上一版**同签名**，可直接覆盖安装，不会清空容器、API Key 与白名单。"
+            echo "- 校验：下载后比对 \`SHA256SUMS.txt\`。"
+            echo
+            echo "---"
+            echo
+            cat release/RELEASE_NOTES.md
+          } > release/RELEASE_NOTES.tmp && mv release/RELEASE_NOTES.tmp release/RELEASE_NOTES.md
+          echo "---- notes 前 20 行 ----"
+          head -20 release/RELEASE_NOTES.md
+
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
         with:
@@ -116,6 +157,7 @@ jobs:
           path: |
             release/*.apk
             release/SHA256SUMS.txt
+            release/RELEASE_NOTES.md
 
       - name: Publish release
         if: startsWith(github.ref, 'refs/tags/')
@@ -124,5 +166,5 @@ jobs:
           files: |
             release/*.apk
             release/SHA256SUMS.txt
-          generate_release_notes: true
+          body_path: release/RELEASE_NOTES.md
           fail_on_unmatched_files: true

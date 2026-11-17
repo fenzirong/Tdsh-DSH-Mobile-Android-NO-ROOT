@@ -533,6 +533,38 @@ public class MainActivity extends Activity {
     private static final java.util.concurrent.atomic.AtomicBoolean sProvisioning =
             new java.util.concurrent.atomic.AtomicBoolean(false);
 
+    /**
+     * 初始化是否正在跑（**包级可见**：前台服务要靠它决定通知写什么、要不要让路）。
+     *
+     * <p>为什么要跨类暴露（2026-11-17，用户日志显示初始化被打断后从头重来）：
+     * 首次安装要在前台跑几分钟（下载 150MB + 解包 + npm），而**那段时间没有任何
+     * 前台服务**——进程只是个普通后台应用，用户一切走/锁屏就被 vivo 清掉，
+     * 下载作废、下次从头再来。现在初始化一开始就叫起前台服务，
+     * 服务靠这个方法知道"现在是初始化，别去抢着起容器"。
+     */
+    static boolean isProvisioning() { return sProvisioning.get(); }
+
+    /**
+     * 是否**还在装环境**（下载/解包/装 npm 这些阶段）。
+     *
+     * <h3>为什么不能直接用 {@link #isProvisioning()}</h3>
+     * 初始化的最后一步是"起 dsh web 并等它就绪"（{@code startWebAndWait}），
+     * 而**那一步恰恰要求前台服务去起容器**。如果服务只看 isProvisioning，
+     * 就会一直让路 → Activity 等到 4 分钟超时 → 首次安装必失败。
+     *
+     * <p>所以这里把"装环境"单独标出来：装完立刻置 false（见 startWebAndWait），
+     * 服务只在"装环境"期间让路。
+     */
+    static volatile boolean sInstalling = false;
+
+    /** 见 {@link #sInstalling}。 */
+    static boolean isInstalling() { return sInstalling; }
+
+    /** 初始化进度百分比（0..100，-1 = 还不知道），给前台服务通知显示。 */
+    static volatile int sProvisionPct = -1;
+    /** 初始化当前步骤的一句话（给前台服务通知显示）。 */
+    static volatile String sProvisionStage = "准备中";
+
     /** 当前步骤名（给状态栏的耗时提示用）。 */
     private volatile String sCurrentStep = "准备中";
     /** 最近一次真正有输出的时刻，给"卡死判定"用。 */
@@ -577,7 +609,16 @@ public class MainActivity extends Activity {
      *
      * 读法：adb logcat -d | grep START_TIMING
      */
-    private static final long T0 = System.currentTimeMillis();
+    /*
+     * 启动计时基准 —— 必须用 **uptimeMillis**，不能用 currentTimeMillis。
+     *
+     * 踩过（2026-11-17 用户日志）：真机上 TIMING 出现过 "+4745ms" 之后紧跟 "+222ms"，
+     * 也就是**时间倒流**。原因是 currentTimeMillis 会被网络校时（NTP）往前拨，
+     * 而启动计时恰恰横跨开机后不久这段"系统时间还在校准"的窗口 ——
+     * 于是日志看起来像"两个进程/乱序"，实际只是一个基准被拨动了。
+     * uptimeMillis 单调递增（不含休眠），正是启动耗时该用的时钟。
+     */
+    private static final long T0 = SystemClock.uptimeMillis();
 
     /**
      * 报告文件的静态引用。
@@ -590,7 +631,7 @@ public class MainActivity extends Activity {
     private static volatile File sReportFile;
 
     private static void mark(String what) {
-        String line = "TIMING +" + (System.currentTimeMillis() - T0) + "ms  " + what;
+        String line = "TIMING +" + (SystemClock.uptimeMillis() - T0) + "ms  " + what;
         Log.i(TAG, "START_TIMING " + line);
         File f = sReportFile;
         if (f != null) {
@@ -2485,8 +2526,50 @@ public class MainActivity extends Activity {
         } catch (Throwable ignore) { }
         mark("开始初始化（" + trigger + "）");
         appendReport("\n--- 开始初始化（触发源: " + trigger + "）---\n");
+        /*
+         * "上次初始化没跑完"的痕迹（2026-11-17）。
+         *
+         * 用户报"每次启动至少一分钟"，日志里能看到初始化跑了两轮 —— 但光看日志
+         * 很难判断"是被系统清了、还是自己崩了、还是用户手动杀了"。
+         * 所以在开始时立一个标记、成功走完再删：只要下次启动看到它还在这儿，
+         * 就说明**上一轮没有跑完**，日志里会直接写出来。
+         * 同时把半截归档的大小也打出来 —— 配合断点续传，用户能看出"这次是接着下"。
+         */
+        try {
+            File marker = new File(new File(getFilesDir(), "probe"), "provision.was");
+            if (marker.exists()) {
+                appendReport("  ⚠️ 上次初始化**没有跑完**（进程可能被系统清掉了）"
+                        + "→ 已下载的部分会续传，不会从 0 开始\n");
+            }
+            //noinspection ResultOfMethodCallIgnored
+            marker.getParentFile().mkdirs();
+            new java.io.FileOutputStream(marker, false).close();
+            File part = new File(new File(getFilesDir(), "probe"), "ubuntu-base-arm64.tar.gz.part");
+            if (part.isFile() && part.length() > 0) {
+                appendReport("  · 检测到上次的半截 rootfs：" + (part.length() >> 20)
+                        + " MB（将尝试续传）\n");
+            }
+        } catch (Throwable ignore) { }
         onProvisionStarted();
         startElapsedTicker();
+        /*
+         * ★ 初始化期间必须**同时**做两件事（2026-11-17，用户日志里初始化被打断后从头重来）：
+         *
+         *   ① 起前台服务：首次安装要下载 150MB + 解包 + npm，几分钟起步。
+         *      以前这段时间**没有任何前台服务**，进程只是普通后台应用 ——
+         *      用户一切走/锁屏，vivo（以及大部分国产 ROM）直接清进程：
+         *      下载作废、下次点开从头再来，于是"每次启动都要等一分钟以上"且永远装不完。
+         *      前台服务的意义就是把进程提到前台优先级，系统不再随手回收，
+         *      用户也能在通知栏看到真实进度。
+         *
+         *   ② 持一把 PARTIAL_WAKE_LOCK：前台服务只解决"优先级"，不解决屏幕熄灭后
+         *      CPU/网络被休眠的问题。下载动辄几分钟，用户锁屏是很自然的动作 ——
+         *      期间必须让 CPU 继续跑，否则下载停在半路，看起来又像"卡住"。
+         *      这把锁**只在初始化期间**持有，结束时立刻释放（见 finally）。
+         */
+        sInstalling = true;
+        provisionWakeLock = acquireProvisionWakeLock();
+        startDshService();
         new Thread(() -> {
             try {
                 runAllTests();
@@ -2495,8 +2578,50 @@ public class MainActivity extends Activity {
             } finally {
                 stopElapsedTicker();
                 sProvisioning.set(false);
+                sInstalling = false;
+                sProvisionPct = -1;
+                releaseProvisionWakeLock(provisionWakeLock);
+                provisionWakeLock = null;
+                appendReport("  · [初始化] 结束，已释放唤醒锁\n");
             }
         }, "dsh-provision").start();
+    }
+
+    /** 初始化期间持有的唤醒锁（见 {@link #startProvisioning} 里的注释）。 */
+    private android.os.PowerManager.WakeLock provisionWakeLock;
+
+    /**
+     * 申请一把 PARTIAL_WAKE_LOCK —— 让**锁屏后**下载/解包还能继续。
+     *
+     * <p>为什么需要它：首次安装要下载约 150MB。前台服务只保证"进程不被优先回收"，
+     * 不保证"屏幕熄灭后 CPU 与网络还醒着"—— 而用户在这几分钟里锁屏几乎是必然的。
+     * 一旦进 Doze，下载会停在半路，表现就是"卡在 37%"。
+     *
+     * <p>为什么带超时（30 分钟）：任何异常路径（进程被杀、回调没走到）都可能让锁
+     * 漏放。{@code acquire(timeout)} 由系统兜底，到点自动释放 —— 漏放也只是多耗半小时电，
+     * 不会变成永久占着。
+     */
+    private android.os.PowerManager.WakeLock acquireProvisionWakeLock() {
+        try {
+            android.os.PowerManager pm = (android.os.PowerManager)
+                    getSystemService(android.content.Context.POWER_SERVICE);
+            if (pm == null) return null;
+            android.os.PowerManager.WakeLock wl = pm.newWakeLock(
+                    android.os.PowerManager.PARTIAL_WAKE_LOCK, "dsh:provision");
+            wl.setReferenceCounted(false);
+            wl.acquire(30L * 60 * 1000);
+            appendReport("  · [初始化] 已持有唤醒锁（锁屏后也会继续下载/解包）\n");
+            return wl;
+        } catch (Throwable t) {
+            android.util.Log.w(TAG, "申请唤醒锁失败（锁屏后下载可能暂停）", t);
+            return null;
+        }
+    }
+
+    private void releaseProvisionWakeLock(android.os.PowerManager.WakeLock wl) {
+        try {
+            if (wl != null && wl.isHeld()) wl.release();
+        } catch (Throwable ignore) { }
     }
 
     /**
@@ -2547,6 +2672,12 @@ public class MainActivity extends Activity {
      * "跳过自检"不会连"启动服务"一起跳过。
      */
     private String startWebAndWait() {
+        /*
+         * 装环境到此为止（见 sInstalling 的注释）：从这里开始，前台服务
+         * **必须**去起容器，否则 Activity 会在 awaitUrl 里空等到超时。
+         */
+        sInstalling = false;
+        sProvisionPct = -1;
         StringBuilder t10 = new StringBuilder();
         mark("开始启动 dsh web");
         progress(t10, "  启动前台服务（App 退到后台也能存活）…\n");
@@ -2591,6 +2722,9 @@ public class MainActivity extends Activity {
 
     private void markVerified() {
         try {
+            // 初始化成功走完 → 清掉"没跑完"的标记（见 startProvisioning）
+            //noinspection ResultOfMethodCallIgnored
+            new File(new File(getFilesDir(), "probe"), "provision.was").delete();
             File f = verifiedStamp();
             //noinspection ResultOfMethodCallIgnored
             f.getParentFile().mkdirs();
@@ -3182,7 +3316,9 @@ public class MainActivity extends Activity {
             if (problem != null) {
                 Env.deleteRecursively(rootfs);
                 Env.deleteRecursively(archive);
+                // 半截归档 + 它的 meta 一起清（meta 记着"这半截是哪个源的、应该多大"）
                 Env.deleteRecursively(new File(archive.getAbsolutePath() + ".part"));
+                Env.deleteRecursively(new File(archive.getAbsolutePath() + ".part.meta"));
             }
 
             boolean ready = rootfsProblem(rootfs) == null;
@@ -3216,8 +3352,17 @@ public class MainActivity extends Activity {
                     } catch (Throwable t) {
                         progress(sb, "  该源失败: " + t.getClass().getSimpleName()
                                 + ": " + t.getMessage() + "\n");
-                        Env.deleteRecursively(new File(archive.getAbsolutePath() + ".part"));
-                        Env.deleteRecursively(archive);
+                        /*
+                         * ⚠️ 这里**不删 .part**（2026-11-17 改）。
+                         *
+                         * 原来每失败一个源就把半截归档删掉，于是"下到 20MB 被掐断"
+                         * 的进度一次都留不下 —— 下次启动只能从 0 重来，
+                         * 首启在慢网络上永远装不完。现在保留它：
+                         * 下一次（哪怕是进程重启后再来）会带 Range 接着下；
+                         * 若换成别的镜像，download() 会按 meta 里的源名主动丢弃，
+                         * 绝不会把两个镜像的字节拼成一个坏包。
+                         */
+                        Env.deleteRecursively(archive);     // 正式归档肯定不存在，顺手清
                     }
                 }
                 if (!ready) {
@@ -3394,24 +3539,108 @@ public class MainActivity extends Activity {
      *   · 没给 → 至少不能小于 minBytes（调用方按已知体积给）；
      *   · 任何中途异常都删掉 .part，绝不留半截文件给下一次误判。
      */
+    /**
+     * 下载一个归档到 {@code dst}，**支持断点续传**。
+     *
+     * <h3>为什么要续传（2026-11-17，用户日志里的真实事故）</h3>
+     * 用户首启时日志显示：初始化跑到"下载 rootfs（源 1/4）"，进程就被系统清掉，
+     * 下次点开又从 TEST 1 重来一遍 —— 而原来的 {@code download()} 每次都是
+     * 「删掉 .part 从 0 开始」。在慢网络 + 国产 ROM 的后台管理下，
+     * 这等于**永远装不完**，用户看到的就是"每次启动都要等一分钟以上"。
+     *
+     * <p>现在：
+     * <ol>
+     *   <li>已经有半截 {@code .part} 就带 {@code Range: bytes=N-} 请求剩余部分，
+     *       网络中断/进程被杀后**接着下**，不浪费已下过的字节；</li>
+     *   <li>续传只认同一个 URL（镜像之间文件可能不同）—— 换源时主动丢掉半截文件，
+     *       绝不把两个镜像的字节拼成一个坏包；</li>
+     *   <li>{@code .part.meta} 记着「源 + 总大小」，服务端文件大小变了也能发现并重来。</li>
+     * </ol>
+     *
+     * <h3>什么情况下仍然要丢弃</h3>
+     * 「文件偏小」（说明这个源给的东西根本不对）和「收到的比声明的还多」（服务端异常）
+     * 都会当场删干净 —— 那是脏数据，续传只会把错误固化下来。
+     */
     private void download(String urlStr, File dst, long minBytes) throws Exception {
+        final File tmp = new File(dst.getAbsolutePath() + ".part");
+        final File meta = new File(tmp.getAbsolutePath() + ".meta");
+        long have = tmp.isFile() ? tmp.length() : 0L;
+        long metaTotal = -1L;
+        if (have > 0) {
+            String m = readSmallText(meta, 4096);
+            String metaUrl = "";
+            if (m != null) {
+                String[] lines = m.split("\n");
+                if (lines.length > 0) metaUrl = lines[0].trim();
+                if (lines.length > 1) {
+                    try { metaTotal = Long.parseLong(lines[1].trim()); } catch (Throwable ignore) { }
+                }
+            }
+            if (!urlStr.equals(metaUrl)) {
+                appendReport("  · 换源下载：丢弃上次半截文件（" + (have >> 20) + " MB）\n");
+                //noinspection ResultOfMethodCallIgnored
+                tmp.delete();
+                //noinspection ResultOfMethodCallIgnored
+                meta.delete();
+                have = 0L;
+                metaTotal = -1L;
+            }
+        }
+
         HttpURLConnection c = (HttpURLConnection) new URL(urlStr).openConnection();
         c.setConnectTimeout(20000);
         c.setReadTimeout(60000);
         c.setInstanceFollowRedirects(true);
         c.setRequestProperty("User-Agent", "DSH-Mobile-Probe");
+        if (have > 0) {
+            // 断点续传：只要剩下的那段
+            c.setRequestProperty("Range", "bytes=" + have + "-");
+        }
         c.connect();
         int code = c.getResponseCode();
-        if (code != HttpURLConnection.HTTP_OK && code != HttpURLConnection.HTTP_PARTIAL) {
+        boolean append;
+        long total;
+        if (code == HttpURLConnection.HTTP_PARTIAL && have > 0) {
+            append = true;
+            total = parseContentRangeTotal(c.getHeaderField("Content-Range"));
+            if (metaTotal > 0 && total > 0 && total != metaTotal) {
+                c.disconnect();
+                //noinspection ResultOfMethodCallIgnored
+                tmp.delete();
+                //noinspection ResultOfMethodCallIgnored
+                meta.delete();
+                throw new IOException("服务端文件已变化（" + metaTotal + " → " + total
+                        + " 字节），已丢弃半截文件，下次从头下");
+            }
+            appendReport("  · 断点续传：从 " + (have >> 20) + " MB 处继续（共 "
+                    + (total > 0 ? (total >> 20) + " MB" : "? MB") + "）\n");
+        } else if (code == HttpURLConnection.HTTP_OK) {
+            // 服务端不支持 Range（或我们本来就没进度）→ 从头写
+            append = false;
+            have = 0L;
+            total = c.getContentLengthLong();
+        } else if (code == 416 && have > 0) {          // 416 Range Not Satisfiable（没有对应常量）
+            c.disconnect();
+            //noinspection ResultOfMethodCallIgnored
+            tmp.delete();
+            //noinspection ResultOfMethodCallIgnored
+            meta.delete();
+            throw new IOException("续传位置无效（服务端 416），已丢弃半截文件，重试即可");
+        } else {
+            c.disconnect();
             throw new IOException("HTTP " + code);
         }
-        long total = c.getContentLengthLong();
-        File tmp = new File(dst.getAbsolutePath() + ".part");
-        long got = 0, lastReported = 0;
+
+        // 先落 meta（源 + 总大小），下次续传才知道"这半截是谁的、应该是多大"
+        try (OutputStream mos = new FileOutputStream(meta, false)) {
+            mos.write((urlStr + "\n" + (total > 0 ? total : -1L)).getBytes("UTF-8"));
+        } catch (Throwable ignore) { }
+
+        long got = have, lastReported = have;
         final long startedAt = System.currentTimeMillis();
         long lastByteAt = startedAt;
         try (InputStream in = new BufferedInputStream(c.getInputStream(), 1 << 16);
-             OutputStream os = new FileOutputStream(tmp)) {
+             OutputStream os = new FileOutputStream(tmp, append)) {
             byte[] buf = new byte[1 << 16];
             int n;
             while ((n = in.read(buf)) > 0) {
@@ -3432,6 +3661,10 @@ public class MainActivity extends Activity {
                 }
                 if (got - lastReported >= (2L << 20)) {
                     lastReported = got;
+                    // 同步给前台服务通知（用户锁屏后从通知栏也能看见在动）
+                    sProvisionStage = "下载 " + (got >> 20) + " / "
+                            + (total > 0 ? (total >> 20) + " MB" : "? MB");
+                    if (total > 0) sProvisionPct = (int) Math.min(99L, got * 100L / total);
                     String line = "    下载中 " + (got >> 20) + " / "
                             + (total > 0 ? (total >> 20) + " MB" : "? MB")
                             + "（已 " + fmtDuration(now - startedAt) + "）\n";
@@ -3442,27 +3675,39 @@ public class MainActivity extends Activity {
             }
         } catch (Throwable t) {
             /*
-             * 半截文件绝不能留下。
+             * ⚠️ 这里**故意保留 .part**（2026-11-17 改）。
              *
-             * 下载失败时如果把 .part 留着（原来就是），下一次运行会把它
-             * 当成"已经下载好的归档"直接拿去解压 —— 坏包被反复使用，
-             * 用户看到的就是"点重试也没用"。
+             * 原来的注释担心"半截文件被当成成品拿去解压"—— 那个担心是对的，
+             * 但根因在**调用方只看 archive.exists()**，不在保留 .part 本身：
+             * .part 永远不会被当成正式归档（正式文件只有下载成功后 rename 才出现）。
+             * 而保留它能换来"进程被杀/断网后接着下"，这在首启必须下载 150MB 的现实里
+             * 是决定性的 —— 否则用户永远装不完。
              */
-            //noinspection ResultOfMethodCallIgnored
-            tmp.delete();
-            throw t;
-        } finally {
             c.disconnect();
+            appendReport("  · 下载中断（已保留 " + (got >> 20) + " MB，下次续传）: "
+                    + t.getMessage() + "\n");
+            throw t;
         }
+        c.disconnect();
+
         if (total > 0 && got != total) {
-            //noinspection ResultOfMethodCallIgnored
-            tmp.delete();
-            throw new IOException("下载不完整（收到 " + got + " / 应为 " + total
-                    + " 字节）—— 已丢弃，换源重试");
+            if (got > total) {
+                // 服务端给了比声明更多的数据：文件可疑，丢弃
+                //noinspection ResultOfMethodCallIgnored
+                tmp.delete();
+                //noinspection ResultOfMethodCallIgnored
+                meta.delete();
+                throw new IOException("下载数据异常（收到 " + got + " > 应为 " + total + "）—— 已丢弃");
+            }
+            // 只下到一半（连接被掐）：保留 .part，下次续传
+            throw new IOException("下载不完整（" + got + " / " + total
+                    + " 字节，已保留，下次续传）");
         }
         if (minBytes > 0 && got < minBytes) {
             //noinspection ResultOfMethodCallIgnored
             tmp.delete();
+            //noinspection ResultOfMethodCallIgnored
+            meta.delete();
             throw new IOException("下载的文件偏小（" + got + " 字节 < " + minBytes
                     + "）—— 已丢弃，换源重试");
         }
@@ -3470,6 +3715,34 @@ public class MainActivity extends Activity {
             copy(tmp, dst);
             //noinspection ResultOfMethodCallIgnored
             tmp.delete();
+        }
+        //noinspection ResultOfMethodCallIgnored
+        meta.delete();
+    }
+
+    /** 读一小段文本（用于 .part.meta 这类自产小文件）；读不到返回 null。 */
+    private String readSmallText(File f, int max) {
+        try (InputStream in = new FileInputStream(f)) {
+            byte[] buf = new byte[Math.min(max, (int) Math.max(1, f.length()))];
+            int n = in.read(buf);
+            if (n <= 0) return null;
+            return new String(buf, 0, n, "UTF-8");
+        } catch (Throwable t) {
+            return null;
+        }
+    }
+
+    /** 从 {@code Content-Range: bytes 100-999/1000} 里取出总大小 1000；取不到返回 -1。 */
+    private static long parseContentRangeTotal(String header) {
+        try {
+            if (header == null) return -1L;
+            int slash = header.lastIndexOf('/');
+            if (slash < 0) return -1L;
+            String t = header.substring(slash + 1).trim();
+            if (t.isEmpty() || "*".equals(t)) return -1L;
+            return Long.parseLong(t);
+        } catch (Throwable t) {
+            return -1L;
         }
     }
 
@@ -3525,7 +3798,10 @@ public class MainActivity extends Activity {
     private void progress(StringBuilder sb, String line) {
         sb.append(line);
         String t = line.trim();
-        if (!t.isEmpty()) sCurrentStep = t;     // 供状态栏的"耗时 + 当前步骤"显示
+        if (!t.isEmpty()) {
+            sCurrentStep = t;                   // 供状态栏的"耗时 + 当前步骤"显示
+            sProvisionStage = t;                // 供前台服务通知显示（见 isProvisioning 注释）
+        }
         liveProgress(line);
     }
 
@@ -3541,6 +3817,10 @@ public class MainActivity extends Activity {
      * 只求单调递增、跟得上真实节奏，不追求精确到秒。
      */
     private void splashProgress(float p) {
+        try {
+            // 同步给前台服务：通知栏里的百分比就取这个值
+            sProvisionPct = Math.max(0, Math.min(100, Math.round(p * 100f)));
+        } catch (Throwable ignore) { }
         final TdshSplashView v = splash;
         if (v == null) return;
         runOnUiThread(() -> {
@@ -3592,8 +3872,8 @@ public class MainActivity extends Activity {
             File archive = new File(base, NODE_DIR + ".tar.gz");
             if (archive.exists() && archive.length() >= NODE_MIN_BYTES) return;  // 归档已在
             File tmp = new File(base, NODE_DIR + ".prefetch");
+            // 只清"成品"，**保留 .part** —— 上次预取没下完的话这次接着下
             Env.deleteRecursively(tmp);
-            Env.deleteRecursively(new File(tmp.getAbsolutePath() + ".part"));
             sNodePrefetchFile = tmp;
             sNodePrefetchAbandoned = false;
             Thread t = new Thread(() -> {
@@ -3659,9 +3939,12 @@ public class MainActivity extends Activity {
             }
         }
         if (t.isAlive()) {
-            sNodePrefetchAbandoned = true;      // 线程收尾时自己删
-            tmp.delete();                        // 先摘掉名字，主流程不会再看见它
-            progress(sb, "  [预取] 还没下完，改由主流程自己下（不等待）\n");
+            /*
+             * 注意：这里**只放弃"接管"，不删半截文件** —— 主流程接下来会用同一个
+             * URL 调 download()，正好接着续传；删掉反而把进度扔了。
+             */
+            sNodePrefetchAbandoned = true;
+            progress(sb, "  [预取] 还没下完，交给主流程接着下（半截文件保留，可续传）\n");
             return;
         }
         if (tmp.exists() && tmp.length() >= NODE_MIN_BYTES) {
@@ -3707,7 +3990,7 @@ public class MainActivity extends Activity {
                             ok = true;
                         } catch (Throwable t) {
                             progress(sb, "  该源失败: " + t.getMessage() + "\n");
-                            Env.deleteRecursively(new File(archive.getAbsolutePath() + ".part"));
+                            // 保留 .part 以便续传（理由同 TEST 7 里那一段）
                             Env.deleteRecursively(archive);
                         }
                     }

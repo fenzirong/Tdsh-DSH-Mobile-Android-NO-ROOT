@@ -40,11 +40,12 @@ android {
          * 详见 CHANGELOG 的 v0.4.11-fz1。
          */
         /*
-         * 0.4.12-fz1：修「每次启动至少一分钟」—— pnpm 安装被挪出启动路径。
-         * 详见 CHANGELOG 的 v0.4.12-fz1。
+         * 0.4.13-fz1：修「首次初始化被打断 → 每次启动都从头重来」。
+         * 下载支持断点续传；初始化期间挂前台服务 + 唤醒锁。
+         * 详见 CHANGELOG 的 v0.4.13-fz1。
          */
-        versionCode 64
-        versionName "0.4.12-fz1"
+        versionCode 65
+        versionName "0.4.13-fz1"
     }
 
     signingConfigs {

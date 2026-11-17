@@ -12,6 +12,13 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
 
     <!--
+      首次初始化要下载约 150MB。前台服务只解决"进程不被优先回收"，
+      不解决"锁屏后 CPU/网络休眠"—— 用户那几分钟里锁屏是常态，
+      所以初始化期间要持一把 PARTIAL_WAKE_LOCK（带 30 分钟超时兜底）。
+    -->
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
+
+    <!--
       悬浮窗（DSH 悬浮窗）：让 DSH 界面能浮在别的应用之上。
       这是 appop 型特殊权限，**不能用 requestPermissions 申请**，
       只能在运行时检查 Settings.canDrawOverlays() 并跳到

@@ -623,7 +623,11 @@ public class DshService extends Service {
                  * startDsh() 会阻塞读容器输出流直到进程结束，
                  * 所以这个循环在容器运行期间根本回不到顶部。
                  */
-                Thread.sleep(5000);
+                /*
+                 * 装环境期间轮询快一点（1.5 秒）：install 一结束就要立刻起容器，
+                 * 否则用户会白等一个完整周期。平时仍是 5 秒。
+                 */
+                Thread.sleep(MainActivity.isInstalling() ? 1500 : 5000);
             } catch (InterruptedException ie) {
                 return;
             } catch (Throwable t) {
@@ -686,6 +690,32 @@ public class DshService extends Service {
     private void startDsh() {
         try {
             File base = Env.base(this);
+            /*
+             * ★ 正在装环境（首次安装）：本服务此刻的唯一职责是**替初始化保住进程**。
+             *
+             * 2026-11-17 用户日志里的真实事故：初始化在下载 rootfs 时进程被系统清掉，
+             * 下载作废、下次点开又从 TEST 1 重来 —— 于是"每次启动都要一分钟以上"。
+             * 前台服务在跑 = 进程是前台优先级，系统不会随手回收；
+             * 通知栏里还会显示真实进度，用户能看见它在动。
+             *
+             * ⚠️ 判据用 isInstalling() 而**不是** isProvisioning()：
+             * 初始化的最后一步是"起 dsh web 并等它就绪"，那一步正需要本服务去起容器，
+             * 若在这里继续让路就会互相等到超时（见 MainActivity.sInstalling 的注释）。
+             */
+            if (MainActivity.isInstalling()) {
+                sNeedsProvision = false;
+                int pct = MainActivity.sProvisionPct;
+                String stage = MainActivity.sProvisionStage;
+                if (stage == null) stage = "准备中";
+                stage = stage.replace('\n', ' ').replace('\r', ' ').trim();
+                if (stage.length() > 42) stage = stage.substring(0, 42) + "…";
+                setState("正在准备运行环境…");
+                updateNotification("正在准备运行环境"
+                        + (pct >= 0 ? " · " + pct + "%" : "")
+                        + " · " + stage + "（锁屏也会继续）");
+                Thread.sleep(1200);
+                return;
+            }
             if (!Env.isInstalled(base)) {
                 sNeedsProvision = true;
                 setState("容器未安装完成");

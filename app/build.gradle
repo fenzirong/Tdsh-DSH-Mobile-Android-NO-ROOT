@@ -39,8 +39,12 @@ android {
          *   · 开屏在"等待阶段"降到 24fps，把 CPU 让给容器。
          * 详见 CHANGELOG 的 v0.4.11-fz1。
          */
-        versionCode 63
-        versionName "0.4.11-fz1"
+        /*
+         * 0.4.12-fz1：修「每次启动至少一分钟」—— pnpm 安装被挪出启动路径。
+         * 详见 CHANGELOG 的 v0.4.12-fz1。
+         */
+        versionCode 64
+        versionName "0.4.12-fz1"
     }
 
     signingConfigs {

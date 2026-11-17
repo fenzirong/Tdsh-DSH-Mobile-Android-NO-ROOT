@@ -850,7 +850,11 @@ public class DshService extends Service {
             String[] groupName = {"proot", "手机控制桥", "自带插件", "挂载点/工作区"};
             for (int i = 0; i < groups.length; i++) {
                 try {
-                    groups[i].get(120, java.util.concurrent.TimeUnit.SECONDS);
+                    /*
+                     * 上限 30 秒（原来 120 秒）。这几组都是本地文件操作，正常是毫秒级；
+                     * 真卡住（存储异常）时也不该让用户等两分钟 —— 超时照样往下走。
+                     */
+                    groups[i].get(30, java.util.concurrent.TimeUnit.SECONDS);
                 } catch (Throwable e) {
                     preflightLog.add("  · ⚠️ 前置任务「" + groupName[i] + "」未按时完成: "
                             + e.getClass().getSimpleName() + "\n");
@@ -882,19 +886,19 @@ public class DshService extends Service {
             appendReport("  · API Key：" + ApiKey.describe(apiKey) + "\n");
 
             /*
-             * 插件市场的前置条件：容器里得有 pnpm（dsh plugin add 内部要用）。
-             * 这一条**不参与并行**：它真要装的时候会在容器里跑 npm（可能几十秒），
-             * 和"起 dsh"抢同一个 rootfs 的写权限不合适；而且它已装好时只是一次
-             * 文件存在性检查，几毫秒。
+             * ⚠️ pnpm **绝不能留在启动路径上**（2026-11-17 修"每次启动至少一分钟"）。
+             *
+             * 原来这里同步调 {@code Env.ensurePnpm()}：装好时它只是一次文件存在性检查
+             * （几毫秒），但**没装好时会在容器里跑 `npm i -g pnpm`** —— 那是一次真实下载，
+             * 而它的超时上限是 {@code PLUGIN_INSTALL_TIMEOUT_MS} = **240 秒**。
+             * 于是网络慢、或连不上 npm registry 的机器上，每次启动都要先等它失败：
+             * 用户看到的就是"启动至少一分钟"，而且**每次都是**（装不上 → 下次还试）。
+             *
+             * pnpm 只被「插件市场」用到（`dsh plugin add` 内部转发给它），
+             * 和"把界面跑起来"毫无关系 —— 所以它必须挪到 dsh 起来之后再做，
+             * 见 {@link #ensurePnpmInBackground}。
              */
-            try {
-                String pnpmLog = Env.ensurePnpm(base, tokenDir, libDir);
-                Log.i(TAG, pnpmLog);
-                appendReport("  " + pnpmLog + "\n");
-            } catch (Throwable t) {
-                Log.w(TAG, "pnpm 检查异常", t);
-            }
-            appendReport("  · [启动] pnpm 检查 " + (System.currentTimeMillis() - tBoot) + "ms\n");
+            appendReport("  · [启动] pnpm 检查已挪到后台（不占启动路径）\n");
 
             /*
              * 中转站（自定义提供方）的密钥作为环境变量进容器。
@@ -925,6 +929,13 @@ public class DshService extends Service {
             updateNotification(apiKey.isEmpty()
                     ? "运行中（未设置 API Key）"
                     : "运行中（已设置 API Key）");
+
+            /*
+             * pnpm 放到这里（dsh 进程已经拉起来之后）再装：
+             * 它只服务插件市场，晚几十秒没有任何影响；而放在前面会把启动拖住。
+             * 失败还会退避 6 小时，避免"每次启动都去撞一次慢网络"。
+             */
+            ensurePnpmInBackground(base, tokenDir, libDir);
 
             // 持续读取输出：解析带 token 的 URL，同时**保留最近若干行**用于诊断
             try (BufferedReader br = new BufferedReader(
@@ -1018,6 +1029,69 @@ public class DshService extends Service {
             Log.e(TAG, "startDsh failed", t);
             setState("启动失败: " + t.getClass().getSimpleName() + " " + t.getMessage());
             updateNotification("DSH 启动失败，详见 App 内日志");
+        }
+    }
+
+    /** pnpm 后台安装的互斥：同一时刻只跑一份。 */
+    private static final java.util.concurrent.atomic.AtomicBoolean sPnpmInstalling =
+            new java.util.concurrent.atomic.AtomicBoolean(false);
+    /** 上次尝试装 pnpm 的时刻（失败后按它退避，别每次启动都去撞网络）。 */
+    private static final String KEY_PNPM_LAST_TRY = "pnpm_last_try";
+    /** 失败后多久内不再重试。 */
+    private static final long PNPM_RETRY_BACKOFF_MS = 6L * 3600 * 1000;
+
+    /**
+     * 在**后台**确保容器里有 pnpm（插件市场的前置条件）。
+     *
+     * <h3>为什么必须异步（2026-11-17，用户报"每次启动至少一分钟"）</h3>
+     * {@code Env.ensurePnpm()} 在 pnpm 缺失时会跑 `npm i -g pnpm` ——
+     * 一次真实下载，超时上限 240 秒。它原来被同步放在"起 dsh 之前"，
+     * 于是网络慢的机器上每次启动都要先等它失败，界面被硬生生拖住一分钟以上。
+     *
+     * <p>而 pnpm 只被「插件市场」用到，和"界面能不能用"无关 ——
+     * 所以这里改成：dsh 起来之后在后台装，装好了插件市场自然可用；
+     * 装不上就退避 {@link #PNPM_RETRY_BACKOFF_MS}，不再每次启动都去撞一次。
+     *
+     * <p>三条边界：已装好 → 连线程都不起；正在装 → 不重复起；
+     * 上次失败且未过退避期 → 直接跳过（日志里写清楚，免得用户以为坏了）。
+     */
+    private void ensurePnpmInBackground(final File base, final String tokenDir, final String libDir) {
+        try {
+            final File pnpm = new File(base, "rootfs/opt/" + Env.NODE_DIR + "/bin/pnpm");
+            if (pnpm.exists()) return;                       // 已就绪：零成本
+            final long now = System.currentTimeMillis();
+            long last = getSharedPreferences(PREFS, MODE_PRIVATE).getLong(KEY_PNPM_LAST_TRY, 0L);
+            if (last > 0 && now - last < PNPM_RETRY_BACKOFF_MS) {
+                long leftMin = (PNPM_RETRY_BACKOFF_MS - (now - last)) / 60000L;
+                appendReport("  · pnpm 上次没装成，约 " + leftMin
+                        + " 分钟后才会再试（插件市场暂时不可用，其它功能不受影响）\n");
+                return;
+            }
+            if (!sPnpmInstalling.compareAndSet(false, true)) return;
+            Thread t = new Thread(() -> {
+                try {
+                    appendReport("  · [后台] 开始装 pnpm（只影响插件市场，界面不等它）\n");
+                    String log = Env.ensurePnpm(base, tokenDir, libDir);
+                    Log.i(TAG, log);
+                    appendReport("  · [后台] " + log + "\n");
+                    boolean ok = pnpm.exists();
+                    getSharedPreferences(PREFS, MODE_PRIVATE).edit()
+                            .putLong(KEY_PNPM_LAST_TRY, ok ? 0L : System.currentTimeMillis())
+                            .apply();
+                } catch (Throwable e) {
+                    Log.w(TAG, "后台装 pnpm 失败", e);
+                    try {
+                        getSharedPreferences(PREFS, MODE_PRIVATE).edit()
+                                .putLong(KEY_PNPM_LAST_TRY, System.currentTimeMillis()).apply();
+                    } catch (Throwable ignore) { }
+                } finally {
+                    sPnpmInstalling.set(false);
+                }
+            }, "pnpm-install");
+            t.setDaemon(true);
+            t.start();
+        } catch (Throwable e) {
+            Log.w(TAG, "ensurePnpmInBackground 异常", e);
         }
     }
 

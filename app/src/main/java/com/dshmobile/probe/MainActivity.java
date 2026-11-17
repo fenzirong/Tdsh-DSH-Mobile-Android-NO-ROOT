@@ -5328,6 +5328,25 @@ public class MainActivity extends Activity {
                          : "· 容器还没启动，保存后会在它启动时自动生效。"));
         box.addView(tip);
 
+        /*
+         * 「复制启动日志」—— 2026-11-17 加。
+         *
+         * 起因：用户报"每次启动至少一分钟"，而"复制日志"原来只在**失败面板**里
+         * （界面没能加载出来 / WebView 太旧）。可启动慢的时候界面是**正常**的，
+         * 用户根本看不到那个按钮，也就没法把 report.txt 发出来 ——
+         * 于是只能靠猜。这里给一个常驻入口：设置 → 复制启动日志。
+         */
+        TextView logBtn = new TextView(this);
+        logBtn.setText("📋 复制启动日志（排查启动慢）");
+        logBtn.setTextSize(13f);
+        logBtn.setTextColor(Ui.ACCENT);
+        logBtn.setPadding(pad / 2, pad / 2, pad / 2, pad / 2);
+        LinearLayout.LayoutParams llp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        llp.topMargin = pad / 2;
+        box.addView(logBtn, llp);
+        logBtn.setOnClickListener(v -> copyLogToClipboard());
+
         // 最近一次失败原因（有才显示）—— 普通用户拿不到 report.txt，这是唯一的线索
         if (sLastFailure != null) {
             TextView fail = new TextView(this);
@@ -5576,6 +5595,19 @@ public class MainActivity extends Activity {
                 dshUrl = u;
                 mark("awaitUrl 拿到地址（自等待起 "
                         + (System.currentTimeMillis() - t0) + "ms）");
+                /*
+                 * 一行"总耗时"，给用户和排查用。
+                 *
+                 * 为什么用 Process.getStartUptimeMillis()：它才是**进程真正被创建**的时刻，
+                 * 比类加载/onCreate 都早 —— 用户说的"启动一分钟"是从点图标算起的，
+                 * 只有这个基准能对上。API 24+ 才有，正好等于本 App 的 minSdk。
+                 */
+                try {
+                    long sinceProc = SystemClock.uptimeMillis()
+                            - android.os.Process.getStartUptimeMillis();
+                    appendReport("  ⏱ 启动总耗时（进程启动 → dsh 就绪）："
+                            + (sinceProc / 1000) + " 秒\n");
+                } catch (Throwable ignore) { }
                 onServerReady(u);
                 appendReport("  ✅ 服务就绪（前台服务）: " + u + "\n");
                 return;

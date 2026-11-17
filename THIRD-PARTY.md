@@ -68,6 +68,30 @@ MIT 许可证全文见 [`LICENSES/MIT-libandroid-shmem.txt`](LICENSES/MIT-liband
 
 ---
 
+## 4b. tawcroot —— ⚠️ GPLv3（强 copyleft，必须合规）
+
+| 项 | 值 |
+| --- | --- |
+| 是什么 | PRoot 的替代实现：用 **seccomp + SIGSYS 在同一进程内**模拟 fake chroot，**不走 ptrace** |
+| 出处 | [wmww/tawc](https://github.com/wmww/tawc)（TAWC 项目），取自 release **v6** 的 `lib/arm64-v8a/libtawcroot.so` |
+| 许可 | **GPL-3.0**，全文见 `LICENSES/GPL-3.0.txt` |
+| 随包分发的文件 | `app/src/main/assets/tawcroot`（116,672 字节，静态链接 aarch64 可执行文件，**未做任何修改**） |
+| SHA-256 | `48eeb93c0083f33f6e53b722684e704ba9b2a34d90f681c560e06edfa871f323` |
+| 获取方式 | `tools/tawcroot/fetch.sh`（下载 v6 APK 并按名字取出该文件，附校验） |
+| 为什么需要 | 真机 profile 显示 dsh 冷启动 59 秒里 86% 是路径类系统调用，PRoot 每个都要 ptrace 停一次；tawcroot 把这项开销降下来（上游实测约 3 倍） |
+| 怎么用 | **默认关闭**。设置里打开后先跑能力自检（硬链接/符号链接/exec//proc//sdcard/pnpm），不过就自动回落 PRoot |
+
+**GPLv3 合规说明（必读）**：
+
+- 本项目自身代码是 **MIT**，但 APK 里**包含** GPLv3 的 tawcroot 二进制，因此
+  **分发这个 APK 时同时负有 GPLv3 的义务**：必须能让接收者拿到对应源码。
+  对应源码 = [wmww/tawc](https://github.com/wmww/tawc) 的 **v6** tag（我们未做任何修改），
+  构建方法见 `tools/tawcroot/README.md`；
+- 如果你要二次分发/上架，请**同时**附上该源码（或指向它的书面要约），
+  并保留本文件与 `LICENSES/GPL-3.0.txt`；
+- 不想承担这条义务的话：把 `app/src/main/assets/tawcroot` 删掉即可 ——
+  功能会自动退回 PRoot（代码里已经有回落路径，不需要改任何 Java）。
+
 ## 5. Shizuku API
 
 | 项目 | 内容 |

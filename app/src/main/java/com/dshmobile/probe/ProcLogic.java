@@ -52,6 +52,15 @@ public final class ProcLogic {
             it.kind = "容器外壳（proot）";
             return it;
         }
+        /*
+         * tawcroot 是单进程实现：顶层 cmdline 里带 tawcroot + rootfs 路径，
+         * re-exec 成 --exec-child 之后就变成 guest 本体（由下面 /bin/dsh 与 node 判据抓）。
+         */
+        if (cmd.contains("tawcroot") && rootfsPath != null && !rootfsPath.isEmpty()
+                && cmd.contains(rootfsPath)) {
+            it.kind = "容器外壳（tawcroot）";
+            return it;
+        }
         if (cmd.contains("/bin/dsh") && cmd.contains("--profile")) {
             it.kind = "DSH 本体（node）";
             return it;

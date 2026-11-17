@@ -988,6 +988,28 @@ public class DshService extends Service {
              * 好处是密钥始终只在这台手机上（App 私有目录 + 启动参数），
              * 容器里、容器写出来的文件里都搜不到它。
              */
+            /*
+             * ── 运行时选择（2026-11-18）──
+             *
+             * 默认 PRoot。用户在设置里开了「tawcroot 加速」才走这条，
+             * 而且**必须先过自检**：tawcroot 是另一套 fake chroot（seccomp+SIGSYS、
+             * 单进程、自己的硬链接仓库），能力边界和 PRoot 不同；
+             * 不过自检就永久回落，并把原因写进设置页 ——
+             * 绝不拿"插件市场装不上"去换几秒启动。
+             */
+            Env.sRuntime = TawcrootGate.isWanted(this) ? Env.RT_TAWCROOT : Env.RT_PROOT;
+            if (Env.RT_TAWCROOT.equals(Env.sRuntime)) {
+                String gateWhy = TawcrootGate.ensureUsable(this, base, libDir, apiKey, tokenDir);
+                if (gateWhy == null) {
+                    appendReport("  · ✅ 运行方式：tawcroot（自检通过；无 ptrace，预期启动更快）\n");
+                } else {
+                    Env.sRuntime = Env.RT_PROOT;
+                    TawcrootGate.fallback(this, gateWhy);
+                    appendReport("  · ⚠️ tawcroot 自检未通过（" + gateWhy
+                            + "）→ 本次改用 PRoot（设置里可重新自检）\n");
+                }
+            }
+
             java.util.List<String> relayEnv = Providers.envPairs(this);
             if (!relayEnv.isEmpty()) {
                 appendReport("  中转站密钥注入 " + relayEnv.size() + " 个（"

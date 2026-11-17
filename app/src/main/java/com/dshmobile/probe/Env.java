@@ -111,6 +111,32 @@ public final class Env {
      */
     public static final String APPDATA_GUEST = "/app-data";
 
+    /**
+     * 运行时实现：PROOT（默认、兼容）或 TAWCROOT（加速，先过自检）。
+     *
+     * <h3>为什么要有这个开关</h3>
+     * 真机 profile 显示 dsh 冷启动 59 秒里 86% 是路径类系统调用，而 PRoot 对
+     * **每一次**都要 ptrace 停一次进程（实测 14 万次上下文切换）。
+     * tawcroot 用 seccomp + SIGSYS 在**同一进程内**模拟（不 ptrace），
+     * 上游项目实测"启动快约三倍"，且不需要改任何插件/路径。
+     *
+     * <p>但它是另一套实现，能力边界不同（没有 {@code -0}、没有
+     * {@code --link2symlink}、硬链接走自己的 link store），所以**必须先跑自检**
+     * 再启用，见 TawcrootGate。
+     */
+    public static final String RT_PROOT = "proot";
+    public static final String RT_TAWCROOT = "tawcroot";
+    /** 当前进程实际使用的运行时（由 DshService 在启动时按设置+自检结果决定）。 */
+    public static volatile String sRuntime = RT_PROOT;
+
+    public static String runtime() { return sRuntime; }
+
+    /** tawcroot 可执行文件（放在 bin/ 下，避免与它自己的 link store 目录重名）。 */
+    public static File tawcrootBin(File base) { return new File(new File(base, "bin"), "tawcroot"); }
+
+    /** tawcroot 的硬链接仓库：按上游约定在 {@code <rootfs>/../tawcroot}。 */
+    public static File tawcrootStore(File base) { return new File(base, "tawcroot"); }
+
     /** 手机控制 CLI 在容器里的安装位置。 */
     public static final String PHONE_CLI_PATH = "/usr/local/bin/phone";
     /** token 目录在容器里的挂载点（由 App 只读绑定进来）。 */
@@ -203,7 +229,14 @@ public final class Env {
             if (cmd == null) continue;
             boolean isDsh = cmd.contains("/bin/dsh") && cmd.contains("--profile");
             boolean isOurProot = cmd.contains("proot") && cmd.contains(rootfsPath);
-            if (isDsh || isOurProot) {
+            /*
+             * tawcroot 是**单进程**实现：顶层进程 cmdline 里带 tawcroot + rootfs 路径，
+             * 它 re-exec 成 `--exec-child` 之后就变成 guest 本身（cmdline 变成 node/…），
+             * 那种情况由上面的 isDsh 判据抓住。这里补的是"还没 exec 完"的那一瞬间，
+             * 以及 guest 里跑的不是 dsh 而是别的命令（比如自检脚本）时也要能清理。
+             */
+            boolean isOurTawcroot = cmd.contains("tawcroot") && cmd.contains(rootfsPath);
+            if (isDsh || isOurProot || isOurTawcroot) {
                 try {
                     android.os.Process.sendSignal(pid, 9);
                     killed++;
@@ -259,7 +292,7 @@ public final class Env {
     public static ProcessBuilder buildProcess(File base, String[] cmd, String libDir) {
         ProcessBuilder pb = new ProcessBuilder(cmd);
         pb.redirectErrorStream(true);
-        if (libDir != null) {
+        if (libDir != null && RT_PROOT.equals(sRuntime)) {
             pb.environment().put("LD_LIBRARY_PATH", libDir);
             pb.environment().put("PROOT_TMP_DIR", new File(base, "tmp").getAbsolutePath());
             /*
@@ -372,6 +405,9 @@ public final class Env {
     public static String[] containerCommand(File base, String apiKey, String phoneTokenDir,
                                             String exe, java.util.List<String> args,
                                             java.util.List<String> extraEnv) {
+        if (RT_TAWCROOT.equals(sRuntime)) {
+            return tawcrootCommand(base, apiKey, phoneTokenDir, exe, args, extraEnv);
+        }
         String nodePath = "/opt/" + NODE_DIR + "/bin";
         java.util.ArrayList<String> a = new java.util.ArrayList<>();
         a.add(new File(base, "proot").getAbsolutePath());
@@ -457,6 +493,96 @@ public final class Env {
         a.add(exe);
         a.addAll(args);
         return a.toArray(new String[0]);
+    }
+
+    /**
+     * 用 tawcroot 起容器命令。
+     *
+     * <h3>与 proot 的差异（都按 v6 的 usage 实测/对照上游文档处理）</h3>
+     * <pre>
+     *   tawcroot [-s] -r ROOTFS [-b SRC:DST[:ro]]... -- CMD [ARGS...]
+     * </pre>
+     * <ul>
+     *   <li><b>没有 {@code -0}</b>：tawcroot 永远在 guest 里伪装 uid 0，不需要开关；</li>
+     *   <li><b>没有 {@code --link2symlink}</b>：它**原生模拟硬链接**（自带的 link store，
+     *       放在 {@code <rootfs>/../tawcroot}）。硬塞 proot 的开关会被判"unknown option"；</li>
+     *   <li><b>没有 {@code --kill-on-exit}</b>：单进程 + PDEATHSIG，杀它就是杀 guest 本身；</li>
+     *   <li><b>没有 {@code -w}</b>：用 {@code sh -c 'cd … && exec …'} 兜住工作目录
+     *       （dsh 会从启动目录读 `.env`，cwd 不能随便丢）；</li>
+     *   <li>{@code -b} 支持 {@code :ro} —— token 目录正好改成只读，比 proot 那边更贴合本意。</li>
+     * </ul>
+     */
+    public static String[] tawcrootCommand(File base, String apiKey, String phoneTokenDir,
+                                           String exe, java.util.List<String> args,
+                                           java.util.List<String> extraEnv) {
+        String nodePath = "/opt/" + NODE_DIR + "/bin";
+        java.util.ArrayList<String> a = new java.util.ArrayList<>();
+        a.add(tawcrootBin(base).getAbsolutePath());
+        a.add("-r"); a.add(new File(base, "rootfs").getAbsolutePath());
+        a.add("-b"); a.add("/dev:/dev");
+        a.add("-b"); a.add("/proc:/proc");
+        a.add("-b"); a.add("/sys:/sys");
+        a.add("-b"); a.add(SDCARD_HOST + ":" + SDCARD_GUEST);
+        a.add("-b"); a.add(SDCARD_HOST + ":" + SDCARD_HOST);
+        if (phoneTokenDir != null && !phoneTokenDir.isEmpty()) {
+            // :ro —— token 只该被读，不该被 guest 改
+            a.add("-b"); a.add(phoneTokenDir + ":" + PHONE_RUN_DIR + ":ro");
+        }
+        a.add("-b"); a.add(base.getAbsolutePath() + ":" + APPDATA_GUEST);
+
+        /*
+         * 工作目录与"清空继承环境"这两件事打包进一段 sh：
+         *   · tawcroot v6 的 usage 里没有 -w，直接传会被判 unknown option；
+         *   · 容器命令必须是 `env -i`（不能把 App 的环境漏进去，否则凭据、
+         *     ANDROID_* 之类会串味），这一层在 sh 里做最直白。
+         */
+        StringBuilder inner = new StringBuilder();
+        inner.append("cd ").append(shellQuote(WORKSPACE)).append(" 2>/dev/null || true; exec /usr/bin/env -i");
+        inner.append(" HOME=/root");
+        inner.append(" PATH=").append(shellQuote(nodePath
+                + ":/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"));
+        inner.append(" LANG=C.UTF-8 TERM=xterm-256color");
+        inner.append(" DSH_PERMISSION_MODE=danger-full-access");
+        inner.append(" DSH_PHONE_RUN=").append(shellQuote(PHONE_RUN_DIR));
+        inner.append(" DSH_PHONE_PORT=").append(PhoneBridge.PORT);
+        if (apiKey != null && !apiKey.trim().isEmpty()) {
+            inner.append(" DEEPSEEK_API_KEY=").append(shellQuote(apiKey.trim()));
+        }
+        if (extraEnv != null) {
+            for (String kv : extraEnv) {
+                if (kv == null || kv.trim().isEmpty()) continue;
+                int eq = kv.indexOf('=');
+                if (eq <= 0) continue;
+                inner.append(' ').append(kv, 0, eq + 1).append(shellQuote(kv.substring(eq + 1)));
+            }
+        }
+        inner.append(' ').append(shellQuote(exe));
+        if (args != null) {
+            for (String s : args) inner.append(' ').append(shellQuote(s));
+        }
+        a.add("--");
+        a.add("/bin/sh");
+        a.add("-c");
+        a.add(inner.toString());
+        return a.toArray(new String[0]);
+    }
+
+    /** 单引号包裹 + 内部单引号转义，供 {@code sh -c} 里的每个参数使用。 */
+    public static String shellQuote(String s) {
+        if (s == null) return "''";
+        if (s.isEmpty()) return "''";
+        // 无需转义的常见形态（路径、数字、URL）直接原样，读日志时更清楚
+        boolean plain = true;
+        for (int i = 0; i < s.length(); i++) {
+            char c = s.charAt(i);
+            if (!(Character.isLetterOrDigit(c) || c == '/' || c == '.' || c == '_'
+                    || c == '-' || c == ':' || c == '@' || c == '%' || c == '+' || c == ',')) {
+                plain = false;
+                break;
+            }
+        }
+        if (plain) return s;
+        return "'" + s.replace("'", "'\\''") + "'";
     }
 
     /**

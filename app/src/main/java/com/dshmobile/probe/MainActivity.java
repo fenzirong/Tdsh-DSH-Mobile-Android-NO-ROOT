@@ -2703,6 +2703,14 @@ public class MainActivity extends Activity {
                 File base = Env.base(this);
                 Env.deleteRecursively(new File(base, "rootfs"));
                 Env.deleteRecursively(new File(base, "staticroot"));
+                /*
+                 * tawcroot 的硬链接仓库必须跟 rootfs 一起删（2026-11-18）：
+                 * 它在 <base>/tawcroot 里存着"哪些文件是一组硬链接"的账本，
+                 * 只删 rootfs 会留下一堆指向不存在文件的 token —— 下次用它启动时
+                 * 表现为"文件在、读出来是坏链接"，比直接报错更难查。
+                 * PRoot 模式下这个目录本来就不存在，删它是幂等的。
+                 */
+                Env.deleteRecursively(Env.tawcrootStore(base));
                 Env.deleteRecursively(new File(base, "ubuntu-base-arm64.tar.gz"));
                 Env.deleteRecursively(new File(base, "ubuntu-base-arm64.tar.gz.part"));
                 for (File f : new File(base, "opt").listFiles()) {
@@ -5744,6 +5752,57 @@ public class MainActivity extends Activity {
          * 排版/绘制，长对话首屏和滚动都会明显轻。代价是极少数机型上可能出现
          * "滚动条位置略跳"，所以留一个明确的关闭入口（关掉后刷新页面即生效）。
          */
+        /*
+         * ── 加速启动：tawcroot（2026-11-18）──────────────────────
+         *
+         * 为什么放在设置里、且默认关：PRoot 是兼容基线（插件市场/手机控制都验过），
+         * tawcroot 是另一套 fake chroot —— 它能把 59 秒里那 86% 的 ptrace 开销换成
+         * 进程内 seccomp 模拟（上游实测约 3 倍），但能力边界不同。
+         * 所以这里**先自检、通过才启用**，失败自动回落并把原因显示在这一行下面。
+         */
+        android.widget.Switch tawc = new android.widget.Switch(this);
+        tawc.setText("加速启动（tawcroot）");
+        tawc.setTextSize(13f);
+        tawc.setTextColor(Ui.TEXT);
+        tawc.setChecked(TawcrootGate.isWanted(this));
+        LinearLayout.LayoutParams twlp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        twlp.topMargin = pad / 2;
+        box.addView(tawc, twlp);
+
+        TextView tawcTip = new TextView(this);
+        tawcTip.setTextSize(11f);
+        tawcTip.setTextColor(Ui.SUB);
+        tawcTip.setText("开启后会用 tawcroot 代替 PRoot 运行容器：不做 ptrace，"
+                + "预期启动快约 3 倍。\n"
+                + "首次启用会**先在容器里跑一遍自检**（硬链接、符号链接、exec、"
+                + "/proc、/sdcard、pnpm），任一项不过就自动回落 PRoot，"
+                + "所以不会把插件市场弄坏。\n"
+                + "当前：" + TawcrootGate.gateNote(this)
+                + (TawcrootGate.isWanted(this) ? "（下次启动生效）" : ""));
+        box.addView(tawcTip);
+        tawc.setOnCheckedChangeListener((v, on) -> {
+            if (on) {
+                TawcrootGate.rearm(this);
+                appendReport("  [设置] 运行方式 → tawcroot（下次启动先自检）\n");
+                android.widget.Toast.makeText(this,
+                        "已开启：下次启动会先自检，通过才启用；不通过会自动回落 PRoot",
+                        android.widget.Toast.LENGTH_LONG).show();
+            } else {
+                TawcrootGate.setMode(this, Env.RT_PROOT);
+                appendReport("  [设置] 运行方式 → PRoot\n");
+                android.widget.Toast.makeText(this, "已关闭，下次启动用 PRoot（兼容模式）",
+                        android.widget.Toast.LENGTH_SHORT).show();
+            }
+            /*
+             * 运行方式是在 startDsh() 里决定的，所以改完要让容器重启一次才生效。
+             * 容器没在跑 / 正在初始化时不动它（初始化结束后会按新设置启动）。
+             */
+            try {
+                if (!isProvisioning() && DshService.isAlive()) DshService.requestRestart();
+            } catch (Throwable ignore) { }
+        });
+
         android.widget.Switch longChat = new android.widget.Switch(this);
         longChat.setText("长对话渲染优化");
         longChat.setTextSize(13f);

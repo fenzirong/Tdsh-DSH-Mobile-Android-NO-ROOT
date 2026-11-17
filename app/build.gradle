@@ -40,12 +40,12 @@ android {
          * 详见 CHANGELOG 的 v0.4.11-fz1。
          */
         /*
-         * 0.4.18-fz1：手机控制链路去掉写死路径（为"原生 node"运行时铺路）。
-         * 端口/token 改成环境变量；预置一份不依赖容器的 phone CLI。
-         * 详见 CHANGELOG 的 v0.4.18-fz1。
+         * 0.4.19-fz1：接入 tawcroot 运行时（PRoot 的 seccomp 替代实现），
+         * 带"先自检、不过就回落 PRoot"的闸门，保护插件市场。
+         * 详见 CHANGELOG 的 v0.4.19-fz1。
          */
-        versionCode 70
-        versionName "0.4.18-fz1"
+        versionCode 71
+        versionName "0.4.19-fz1"
     }
 
     signingConfigs {

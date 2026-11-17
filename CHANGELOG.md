@@ -6,6 +6,75 @@
 
 ---
 
+## v0.4.19-fz1
+
+（`versionCode 70 → 71`。接上 **tawcroot** 运行时：把"每次 stat 都 ptrace 停一次"换成进程内 seccomp 模拟。
+默认关闭，开了也要先过自检 —— **插件市场不受影响**是硬约束。）
+
+### 为什么是 tawcroot
+
+用户的真机 V8 profile 已经把结论钉死：dsh 冷启动 59 秒里 **86%** 是
+`fstat/internalModuleStat/lstat/realpath`，`voluntary_ctxt_switches` 14 万次 ——
+也就是 **PRoot 每次路径翻译都要停一次进程**。所以优化 JS 是白费力气。
+
+[tawcroot](https://github.com/wmww/tawc) 是从零写的 fake chroot：**seccomp `RET_TRAP` +
+进程内 `SIGSYS` 处理**（gVisor 的 "systrap" 思路），路径翻译、fake root、硬链接模拟
+全在同一进程里完成，**没有 tracer、没有每次系统调用的上下文切换**。上游实测启动约快 3 倍。
+
+### 与 PRoot 的差异（每一条都可能在"插件市场"上表现出来）
+
+| 项 | PRoot | tawcroot | 我们的处理 |
+| --- | --- | --- | --- |
+| 调用形式 | `proot -r … -0 -w … --link2symlink --kill-on-exit -b …` | `tawcroot [-s] -r ROOTFS [-b SRC:DST[:ro]]… -- CMD` | 新增 `Env.tawcrootCommand()` 单独生成 |
+| 假 root | `-0` | 总是伪装 uid 0 | 去掉 `-0` |
+| 硬链接 | `--link2symlink`（符号链接冒充） | **原生模拟**（仓库在 `<rootfs>/../tawcroot`） | 去掉开关；**清空容器时连仓库一起删** |
+| 工作目录 | `-w` | 没有该参数 | 用 `sh -c 'cd … && exec …'` 兜住 |
+| 只读绑定 | 不支持 | `-b SRC:DST:ro` | token 目录改成只读绑定（更贴合本意） |
+| 进程模型 | tracer + tracee | **单进程** + PDEATHSIG | `killStaleDsh` / `ProcLogic` 都加了 tawcroot 判据 |
+
+### 硬约束：插件市场必须照常能用 → 准入闸门
+
+打开开关后，**首次启动会先在容器里跑一遍自检**（`TawcrootGate`，结论按 versionCode 缓存）：
+
+1. **硬链接**：`ln` 后能读、`st_nlink ≥ 2` —— dsh 的原子写与 pnpm 布局都靠它；
+2. **符号链接**：`ln -s` + `readlink` —— pnpm 的 `node_modules` 就是链接树；
+3. **execve**：`node -e 0`、`sh -c` —— 起 node / bash 工具 / npm；
+4. **/proc**：`/proc/self/status` 可读；
+5. **/sdcard 绑定**：可写可读 —— 工作区与「手机文件」插件；
+6. **pnpm**：已装则必须能跑 —— 插件市场的前置条件。
+
+**任一项不过 → 自动回落 PRoot**，并把原因写进设置页
+（`加速启动（tawcroot）` 下面那行会显示"自检未通过：HARDLINK_NLINK"这种可读标记）。
+也就是说：**最坏情况是"没变快"，而不是"插件市场坏了"。**
+
+### 许可（GPLv3，已按你选的"随包分发"处理）
+
+- 二进制随 APK：`app/src/main/assets/tawcroot`（116,672 字节，静态链接 aarch64，**未修改**）；
+- SHA-256 与出处写进 `THIRD-PARTY.md` 的「4b. tawcroot」；
+- 许可全文：`LICENSES/GPL-3.0.txt`；
+- 对应源码：上游 `v6` tag，获取/校验脚本：`tools/tawcroot/fetch.sh`，构建与差异说明：`tools/tawcroot/README.md`；
+- **不想承担 GPLv3 义务**：删掉 `assets/tawcroot` 即可，代码会自动退回 PRoot（不需要改任何 Java）。
+
+### 已知边界（写清楚，免得当成 bug）
+
+| 边界 | 说明 |
+| --- | --- |
+| 没有真正隔离 | 上游 README 明说单进程设计 **可被逃逸**。我们本来就是 `danger-full-access`，但插件市场装的第三方插件因此更容易越界 —— 这是用"启动速度"换的 |
+| 容器不再"接管" | PDEATHSIG：App 进程一死容器立刻跟着死，所以 `复用正在运行的容器` 在 tawcroot 下不会命中（回落 PRoot 时会照旧命中） |
+| Android 12+ 子进程限制 | 上游提示 phantom process killer 会限制并发子进程；重度并行任务可能失败，切回 PRoot 即可 |
+| 首次启用多花几秒 | 自检本身要起一次容器；只在首次/升级后各一次 |
+
+### 怎么验证
+
+1. 设置 → 打开「加速启动（tawcroot）」→ 重启 App（或让容器重启）；
+2. `report.txt` 里应出现 `· ✅ 运行方式：tawcroot（自检通过；无 ptrace，预期启动更快）`；
+   失败则是 `⚠️ tawcroot 自检未通过（…）→ 本次改用 PRoot`；
+3. 对比 `· [启动] dsh 计时：首行 Nms · 共 N 行` 这条 —— 它才是"把插件加载进来"的耗时；
+4. **插件市场回归**：装一个插件（`dshmarket` 里随便挑个纯 JS 的），确认能装、能生效；
+   装不上就把开关关掉，并把 `report.txt` 发出来。
+
+---
+
 ## v0.4.18-fz1
 
 （`versionCode 69 → 70`。**手机控制这条链路本来就与 proot 无关** —— 这一版把它从写死路径里解出来，为"原生 node 运行时"铺路。）

@@ -6,6 +6,61 @@
 
 ---
 
+## v0.4.18-fz1
+
+（`versionCode 69 → 70`。**手机控制这条链路本来就与 proot 无关** —— 这一版把它从写死路径里解出来，为"原生 node 运行时"铺路。）
+
+### 先回答一个问题：换运行时，还能控制手机吗
+
+能，因为这条链路里 proot 只负责"跑 shell 命令"，与手机控制无关：
+
+```
+agent（模型）
+  │  bash 工具里敲 `phone tap 500 1200`
+  ▼
+phone CLI          ← 纯 HTTP 客户端（一个几十行的 Node 脚本，任何 Node 都能跑）
+  │  GET http://127.0.0.1:3099/…?token=…
+  ▼
+手机控制桥          ← App 进程里的 Java（ServerSocket），**白名单在这里强制**
+  │
+  ├─ 无障碍服务（DshAccessibilityService）
+  ├─ Shizuku / 直接命令后端
+  └─ 截图、UI 树、按键、注入文字…
+```
+
+也就是说：真正的权限与能力全在 **Java 侧**（无障碍 / Shizuku / 白名单），
+CLI 与插件只是"发 HTTP 请求"。所以就算 node 不再穿 proot，控制手机**一行逻辑都不用改**。
+
+**唯一曾经写死的三处**，这一版全部改成"环境变量优先、老路径兜底"：
+
+| 项 | 改之前 | 改之后 |
+| --- | --- | --- |
+| `phone` CLI 的 shebang | `#!/opt/node-v22.23.2-linux-arm64/bin/node`（写死容器里的 node） | `#!/usr/bin/env node`（哪个 node 都行） |
+| 控制桥端口 | 硬编码 `3099`（CLI 与插件各写一份） | `DSH_PHONE_PORT`（默认 3099） |
+| token 位置 | 硬编码 `/run/dsh-phone/token`（只在 proot 里有这个挂载点） | `DSH_PHONE_TOKEN` / `DSH_PHONE_RUN` 优先，再退回 `/run/dsh-phone` 与 `/sdcard/dsh/.phone-token` |
+
+App 侧同时：
+
+- 起容器时显式注入 `DSH_PHONE_RUN=/run/dsh-phone`、`DSH_PHONE_PORT=3099`（容器命令是 `env -i`，必须显式给）；
+- **额外预置一份** `files/probe/native/bin/phone` —— 将来"node 原生跑"时把它放进 PATH 即可，
+  不用再回来改安装逻辑；它的 token 直接读 App 私有目录，比绑进容器更简单也更安全。
+
+### 插件更新：`dsh-phone` 1.0.4 → 1.0.5
+
+插件里的端口/token 同样改成环境变量优先（两种运行时共用一份代码）。
+因为判重用的是**文件名**，升级后会自动重装一次自带插件 —— 这是预期行为。
+
+### 换成原生运行时之后，还需要处理的点（提前记下来）
+
+| 项 | 说明 |
+| --- | --- |
+| `bash` 工具 | agent 跑 shell 命令仍要走容器（`proot … /bin/bash -lc`），包一层 wrapper 即可；每条命令多约 45ms，但命令次数少，不是瓶颈 |
+| 路径差异 | 原生下 `/sdcard` 直接可访问（更好），`/root` 不存在 → HOME 指向 App 私有目录，profile 要迁移一次 |
+| 虚拟屏 token | `VScreen` 现在写容器里的 `/run/dsh-vsd/token`，原生运行时同样要改成私有目录（同一套改法） |
+| 插件市场 | 原生 npm/pnpm 可用；纯 JS 插件没问题，**带 node-gyp 原生编译的会失败** |
+
+---
+
 ## v0.4.17-fz1
 
 （`versionCode 68 → 69`。**修 0.4.16 引入的启动变慢** —— 是我把诊断放错了地方。）

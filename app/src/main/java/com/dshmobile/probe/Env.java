@@ -433,6 +433,17 @@ public final class Env {
          *   与其他应用私有数据）。
          */
         a.add("DSH_PERMISSION_MODE=danger-full-access");
+        /*
+         * 手机控制桥：把"token 在哪、端口是多少"显式告诉 dsh 与它的插件。
+         *
+         * 为什么要显式传（2026-11-17）：这两项原来在 CLI 与插件里**写死**
+         * 成 /run/dsh-phone 与 3099。写死能用的前提是"dsh 一定跑在 proot 里、
+         * 且 App 恰好把 token 绑到那个路径" —— 而我们要换的技术路线正是
+         * "node 原生跑、不穿 proot"，那时 /run 这个挂载点根本不存在。
+         * 改成环境变量后，同一份 CLI/插件在两种运行时下都能直连控制桥。
+         */
+        a.add("DSH_PHONE_RUN=" + PHONE_RUN_DIR);
+        a.add("DSH_PHONE_PORT=" + PhoneBridge.PORT);
         if (apiKey != null && !apiKey.trim().isEmpty()) {
             a.add("DEEPSEEK_API_KEY=" + apiKey.trim());
         }
@@ -557,7 +568,14 @@ public final class Env {
      * 用它判重的话，App 升级带了新插件也永远会被当成"已安装、跳过"，
      * 用户就再也拿不到插件的更新了。
      */
-    public static final String PHONE_PLUGIN_TGZ = "dsh-phone-1.0.4.tgz";
+    /*
+     * ⚠️ 改这个文件名就等于"发布新版本"（判重用的是文件名）。
+     *
+     * 1.0.5：手机控制桥的端口与 token 路径改成"环境变量优先"，
+     *        为将来的原生 node 运行时做准备（见 plugin/dsh-phone/index.js 顶部注释）。
+     *        同一份插件在 proot 容器与原生运行时下都能用。
+     */
+    public static final String PHONE_PLUGIN_TGZ = "dsh-phone-1.0.5.tgz";
     /** 右侧栏「手机文件」插件（浏览手机存储 + 多选加进会话）。 */
     public static final String PHONE_FILES_TGZ = "dsh-phone-files-1.0.2.tgz";
     public static final String PHONE_FILES_NAME = "dsh-phone-files";
@@ -1765,6 +1783,34 @@ public final class Env {
 
             //noinspection ResultOfMethodCallIgnored
             new File(rootfs, "run/dsh-phone").mkdirs();
+
+            /*
+             * 另外装一份**不依赖容器的** phone CLI（2026-11-17）。
+             *
+             * 手机控制这条链路本来就与 proot 无关：agent 调 `phone` → 它只是一个
+             * HTTP 客户端 → 真正干活的是 App 里的控制桥（Java，127.0.0.1:3099，
+             * 白名单在 App 侧强制）。所以只要 PATH 里有 node，CLI 在原生态下同样能跑。
+             *
+             * 这里预置一份到 base/native/bin/，将来"node 原生跑"的运行时把
+             * 这个目录放进 PATH 即可 —— 不用再回来改一遍安装逻辑。
+             * token 用 App 自己的私有目录（PhoneBridge.tokenDir），原生进程直接可读，
+             * 比"绑进容器"更简单也更安全。
+             */
+            try {
+                File nativeBin = new File(base, "native/bin");
+                //noinspection ResultOfMethodCallIgnored
+                nativeBin.mkdirs();
+                File nativeCli = new File(nativeBin, "phone");
+                try (InputStream in = c.getAssets().open("phone-cli.js");
+                     OutputStream os = new FileOutputStream(nativeCli)) {
+                    byte[] buf = new byte[8192];
+                    int n;
+                    while ((n = in.read(buf)) > 0) os.write(buf, 0, n);
+                }
+                Os.chmod(nativeCli.getAbsolutePath(), 0755);
+            } catch (Throwable t) {
+                android.util.Log.w("DSH_ENV", "预置原生 phone CLI 失败（不影响容器内那份）", t);
+            }
 
             /*
              * 虚拟屏守护的 token 也放一份进容器（/run/dsh-vsd/token）。

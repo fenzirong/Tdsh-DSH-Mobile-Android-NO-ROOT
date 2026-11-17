@@ -1,4 +1,4 @@
-#!/opt/node-v22.23.2-linux-arm64/bin/node
+#!/usr/bin/env node
 /*
  * phone —— 让 agent 操作手机的控制台工具。
  *
@@ -14,8 +14,20 @@
 const http = require('http');
 const fs = require('fs');
 
-const PORT = 3099;
-const TOKEN_FILES = ['/run/dsh-phone/token', '/sdcard/dsh/.phone-token'];
+/*
+ * 端口与 token 位置**不写死**（2026-11-17，为"原生 node"运行时做准备）：
+ *   DSH_PHONE_RUN / DSH_PHONE_TOKEN / DSH_PHONE_PORT 由 App 显式注入；
+ *   都读不到时才退回容器里的 /run 挂载点与共享存储那份。
+ * 这样同一份 CLI 在 proot 容器里和原生运行时下都能直连控制桥。
+ */
+const PORT = Number(process.env.DSH_PHONE_PORT || 3099);
+const TOKEN_FILES = (function () {
+  const out = [];
+  if (process.env.DSH_PHONE_TOKEN) out.push(process.env.DSH_PHONE_TOKEN);
+  if (process.env.DSH_PHONE_RUN) out.push(process.env.DSH_PHONE_RUN.replace(/\/+$/, '') + '/token');
+  out.push('/run/dsh-phone/token', '/sdcard/dsh/.phone-token');
+  return out;
+})();
 
 function readToken() {
   for (const p of TOKEN_FILES) {

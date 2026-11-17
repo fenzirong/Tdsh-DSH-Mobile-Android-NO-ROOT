@@ -19,9 +19,30 @@ import { defineTool } from '@deepseek-ai/dsh-tools'
 export const name = 'phone'
 export const inject = ['tools']
 
-const PORT = 3099
-// token 由 App 只读绑定进容器；放在共享存储会被别的应用读到，所以优先用 /run
-const TOKEN_FILES = ['/run/dsh-phone/token', '/sdcard/dsh/.phone-token']
+/*
+ * 控制桥的端口与 token 位置**不再写死**（2026-11-17）。
+ *
+ * 为什么要改：这套插件的目标运行时不止一种 ——
+ *   · 现在：dsh 跑在 proot 容器里，token 由 App 只读绑定到 /run/dsh-phone；
+ *   · 将来（原生 node，为了避开 ptrace 的 59 秒启动）：dsh 跑在 App 自己的进程域，
+ *     token 直接放在 App 私有目录，容器里那个 /run 挂载点根本不存在。
+ *
+ * 所以改成"环境变量优先、老的固定路径兜底"：
+ *   DSH_PHONE_RUN   —— token 所在目录（App 两种运行时都会显式传进来）
+ *   DSH_PHONE_TOKEN —— 直接给 token 文件路径（优先级更高）
+ *   DSH_PHONE_PORT  —— 控制桥端口（默认 3099）
+ * 这样**同一份插件代码在两种运行时都能用**，不需要为原生路线再发一个插件版本。
+ */
+const PORT = Number(process.env.DSH_PHONE_PORT || 3099)
+const TOKEN_FILES = (function () {
+  const out = []
+  if (process.env.DSH_PHONE_TOKEN) out.push(process.env.DSH_PHONE_TOKEN)
+  const run = process.env.DSH_PHONE_RUN
+  if (run) out.push(run.replace(/\/+$/, '') + '/token')
+  // 兜底：老容器（只读绑定的 /run）与共享存储里那份
+  out.push('/run/dsh-phone/token', '/sdcard/dsh/.phone-token')
+  return out
+})()
 
 function readToken() {
   for (const p of TOKEN_FILES) {

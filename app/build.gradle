@@ -40,12 +40,12 @@ android {
          * 详见 CHANGELOG 的 v0.4.11-fz1。
          */
         /*
-         * 0.4.17-fz1：修 0.4.16 引入的启动变慢 —— 诊断挪出关键路径
-         * （就绪后 40 秒、后台优先级），容器基线改为用户点按钮才跑。
-         * 详见 CHANGELOG 的 v0.4.17-fz1。
+         * 0.4.18-fz1：手机控制链路去掉写死路径（为"原生 node"运行时铺路）。
+         * 端口/token 改成环境变量；预置一份不依赖容器的 phone CLI。
+         * 详见 CHANGELOG 的 v0.4.18-fz1。
          */
-        versionCode 69
-        versionName "0.4.17-fz1"
+        versionCode 70
+        versionName "0.4.18-fz1"
     }
 
     signingConfigs {

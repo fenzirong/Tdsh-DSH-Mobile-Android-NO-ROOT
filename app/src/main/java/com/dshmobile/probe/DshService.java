@@ -980,6 +980,19 @@ public class DshService extends Service {
                 appendReport("  中转站密钥注入 " + relayEnv.size() + " 个（"
                         + Providers.load(this).size() + " 个自定义提供方）\n");
             }
+            /*
+             * 依赖布局为"零符号链接"时，追加 NODE_OPTIONS=--preserve-symlinks。
+             *
+             * 依据是用户真机 profile：59 秒里 lstat+realpath 合计约 11 秒，
+             * 那部分**专门**来自 pnpm 风格的符号链接（Node 每 import 一次就要
+             * lstat + realpath 一次）。布局里没有链接时这个开关不改变任何解析结果，
+             * 只让 Node 跳过 realpath —— 纯收益；有链接时则**绝对不能加**
+             * （会让同一个包解析成两个实例），判断见 Env.preserveSymlinksEnv。
+             */
+            if (preserveSymlinksPreferred()) {
+                Env.preserveSymlinksEnv(relayEnv);
+                appendReport("  · 依赖布局无符号链接 → 已启用 --preserve-symlinks\n");
+            }
             String[] cmd = Env.dshWebCommand(base, apiKey, tokenDir, relayEnv);
             // 诊断：状态目录体积（见 logDshStateSizes 的注释），起容器之前记一笔
             logDshStateSizes(base);
@@ -1104,6 +1117,7 @@ public class DshService extends Service {
                              * 否则"客户端先连、代理还没起来"又会回到用户抱怨的那个绕法。
                              */
                             probeContainerBaselineOnce(base, libDir);
+                            measureLayoutOnce(base);
                             Services.startEnabled(DshService.this);
                             Services.startWatchdog(DshService.this);
                             /*
@@ -1374,6 +1388,59 @@ public class DshService extends Service {
      * <p>只在版本变化后测一次（结果进 SharedPreferences），
      * 所以长期看不增加任何启动成本。
      */
+    /**
+     * 依赖布局诊断：数一数 profile 与全局安装里的「文件数 / 符号链接数」。
+     *
+     * <p>为什么值得单独测（用户 2026-11-17 的真机 profile）：dsh 冷启动 59 秒里
+     * 86% 是路径类系统调用，其中 lstat + realpath 约 11 秒**专门来自符号链接**。
+     * 所以"有没有链接、有多少"直接决定两件事：
+     * 能不能开 {@code --preserve-symlinks}（零链接才行），
+     * 以及扁平化（hoisted）值不值得做。
+     *
+     * <p>走 App 自己的文件 API（**不穿 proot**），按版本只测一次。
+     */
+    private void measureLayoutOnce(final File base) {
+        try {
+            final int vc = getPackageManager().getPackageInfo(getPackageName(), 0).versionCode;
+            if (getSharedPreferences(PREFS, MODE_PRIVATE).getInt("layout_vc", -1) == vc) return;
+            new Thread(() -> {
+                try {
+                    long[] hd = Env.layoutOf(new File(base, "rootfs/root/.dsh/profiles/web/node_modules"), 40000);
+                    long[] gl = Env.layoutOf(new File(base, "rootfs/opt/" + Env.NODE_DIR + "/lib/node_modules"), 40000);
+                    long links = hd[1] + gl[1];
+                    appendReport("  · [布局] 依赖文件 " + (hd[0] + gl[0]) + " 个 · 符号链接 " + links
+                            + " 个 · 合计 " + ((hd[2] + gl[2]) >> 20) + " MB"
+                            + "（profile " + hd[0] + "/" + hd[1] + "，全局 " + gl[0] + "/" + gl[1] + "）\n");
+                    if (links == 0) {
+                        appendReport("  · [布局] 无符号链接 → 下次启动启用 --preserve-symlinks"
+                                + "（省掉每个模块的 realpath）\n");
+                    } else {
+                        appendReport("  · [布局] 有 " + links + " 个符号链接 → 暂不启用 --preserve-symlinks"
+                                + "（会让同一个包解析成两份）；扁平化依赖预计可省 5~10 秒\n");
+                    }
+                    getSharedPreferences(PREFS, MODE_PRIVATE).edit()
+                            .putInt("layout_vc", vc)
+                            .putLong("layout_links", links)
+                            .putBoolean("layout_preserve", links == 0L)
+                            .apply();
+                } catch (Throwable t) {
+                    Log.w(TAG, "依赖布局测量失败", t);
+                }
+            }, "layout-probe").start();
+        } catch (Throwable ignore) { }
+    }
+
+    /** 本次版本测出来的布局是否"零符号链接"（决定要不要加 --preserve-symlinks）。 */
+    private boolean preserveSymlinksPreferred() {
+        try {
+            SharedPreferences sp = getSharedPreferences(PREFS, MODE_PRIVATE);
+            int vc = getPackageManager().getPackageInfo(getPackageName(), 0).versionCode;
+            return sp.getInt("layout_vc", -1) == vc && sp.getBoolean("layout_preserve", false);
+        } catch (Throwable t) {
+            return false;
+        }
+    }
+
     private void probeContainerBaselineOnce(final File base, final String libDir) {
         try {
             final int vc = getPackageManager().getPackageInfo(getPackageName(), 0).versionCode;

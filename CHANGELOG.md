@@ -6,6 +6,78 @@
 
 ---
 
+## v0.4.16-fz1
+
+（`versionCode 67 → 68`。依据是用户自己做的 V8 profile —— 结论比我们之前的推断硬得多。）
+
+### 真机 profile 说了什么
+
+用户在隔离 `DSH_HOME` 里跑了影子实例，拿到 V8 CPU profile（窗口 64.4s，
+采样本身有开销，所以只看占比）：
+
+| self time | 占比 | 位置 |
+| --- | --- | --- |
+| fstat | 28.4% | 路径探测 |
+| internalModuleStat | 23.8% | 路径探测 |
+| lstat | 12.6% | **符号链接** |
+| realpath | 4.6% | **符号链接** |
+| open / existsSync / stat / close | 约 8.6% | 路径探测 |
+| readFileUtf8 | 3.0% | 真的读文件 |
+| compileSourceTextModule | 3.1% | V8 编译 |
+| **`@deepseek-ai/dsh` 业务代码** | **5.3%** | — |
+
+配套指标：`voluntary_ctxt_switches: 140648`（46 秒 14 万次主动上下文切换）、
+`rchar 70MB / syscr 13772`、`utime 12.8s + stime 7.5s = 20.3s`（wall 42s，
+差的那 20 秒就是 syscall 往返）。
+
+**一句话**：proot 用 ptrace 拦每个路径类系统调用做翻译，每次 `stat` 都要让进程停一下；
+而 Node 解析一个模块要试十几个候选路径，dsh 内核包里有 12,360 个 JS 文件。
+**86% 的时间花在路径探测上，业务逻辑只占 5.3%，网络一条都没有。**
+
+这同时解释了两件事：
+
+- 摘掉 `dshmarket`（52 个 JS / 5.4 MB）确实从 76 → 59 秒：少了一串 stat 链，**线性收益**；
+- 之前试的 `NODE_COMPILE_CACHE` 彻底无效：**proot 下缓存目录 7KB / 0 个文件**，
+  等于没开。这条路可以从"待试"里划掉了。
+
+### 本版做的两件事（都直接对着 profile 里的那 41.2%）
+
+**① 依赖布局诊断**（每版本测一次，走 App 自己的文件 API，不穿 proot）：
+
+```
+· [布局] 依赖文件 12360 个 · 符号链接 501 个 · 合计 xxx MB（profile a/b，全局 c/d）
+```
+
+这一个数字决定两件事：`lstat + realpath` 那 17.2% 值不值得治（有链接就有），
+以及扁平化（hoisted）能省多少。
+
+**② 零符号链接时自动启用 `--preserve-symlinks`**
+
+`lstat + realpath` 合计 17.2%，**专门**来自符号链接（Node 每 import 一次就要
+lstat + realpath 一次）。当依赖目录里一个链接都没有时，`realpath(p) === p`，
+这个开关不改变任何解析结果，只让 Node 跳过 realpath —— 纯收益。
+
+反过来：**只要有符号链接就绝不加**（`--preserve-symlinks` 会让同一个包经两条
+路径解析成两个实例，pnpm 布局下是已知的坑）。也刻意不加 `--preserve-symlinks-main`：
+容器里的 `/opt/node-…/bin/dsh` 本身就是指向 bin.js 的链接，加了入口目录会被当成 `bin/`。
+
+> 也就是说：这个开关是给"已经扁平化"或"本来就是 npm 扁平装"的环境自动生效的。
+> 你现在 501 个链接，它不会开 —— 日志里会明确写"有 501 个符号链接 → 暂不启用"。
+
+### 关于"再压下去"
+
+按这份 profile，App 侧已经没什么可做了（App 自己只占启动的 3 秒，容器里我们
+一行代码都不执行）。剩下的都是**容器布局与 proot 之间的结构性成本**：
+
+| 手段 | 预计 | 说明 |
+| --- | --- | --- |
+| 摘不用的 bundle | 线性，每摘一个几秒 | `dsh-free-search`、`better-dsh-session-deletetool` 等 |
+| `node-linker=hoisted`（501 链接 → 0） | 5~10 秒 | 要重装依赖；本版的诊断会验证链接数是否真的归零 |
+| dsh 升到 0.2.2-rc.3 | 未知 | `--dump-config` 已只占 849ms，主要看有无更省的解析实现 |
+| 干掉 ptrace（bionic 版 node 直跑） | 可能是数量级 | 结构性改造：容器只留 shell 工具，node 不穿 proot。风险大，另立项 |
+
+---
+
 ## v0.4.15-fz1
 
 （`versionCode 66 → 67`。三件事：长对话卡顿、通知栏去掉 Key 提示、启动不再弹框。）

@@ -1840,6 +1840,72 @@ public final class Env {
     }
 
     /**
+     * 统计一个依赖目录的「布局画像」：{文件数, 符号链接数, 字节数}。
+     *
+     * <h3>为什么要它（2026-11-17，用户 profile 结论）</h3>
+     * 真机 V8 profile 显示：dsh 冷启动 59 秒里 **86% 是 fstat/lstat/realpath/open**，
+     * 业务代码只占 5.3% —— 也就是说时间全花在"Node 解析模块时的路径探测"上，
+     * 而 proot 对**每一个**这类系统调用都要 ptrace 停一次进程（实测 14 万次上下文切换）。
+     *
+     * <p>其中 `lstat + realpath` 合计约 11 秒，专门来自 **符号链接**：pnpm 风格的
+     * `node_modules` 里每个包都是一个链接，Node 每 import 一次就要 lstat + realpath 一次。
+     * 所以"这个目录里到底有多少符号链接"是个决定性的数字：
+     * <ul>
+     *   <li><b>0 个</b> → 已经是扁平布局，可以安全地开 {@code --preserve-symlinks}
+     *       把那部分 realpath 全部省掉（见 {@link #preserveSymlinksEnv}）；</li>
+     *   <li><b>几百个</b> → 就是上面的开销来源，扁平化能省 5~10 秒。</li>
+     * </ul>
+     *
+     * <p>遍历**不跟进符号链接**（否则会顺着 pnpm 的链接爬到别处去），
+     * 并且带文件数上限，避免这个诊断自己变成负担。走的是 App 自己的文件 API，
+     * **不穿 proot**，所以 1 万多个文件也只是几十到几百毫秒，且只测一次（按版本缓存）。
+     */
+    public static long[] layoutOf(File dir, int cap) {
+        long[] acc = {0, 0, 0};                 // files, symlinks, bytes
+        if (dir == null || !dir.isDirectory()) return acc;
+        java.util.ArrayDeque<File> stack = new java.util.ArrayDeque<>();
+        stack.push(dir);
+        while (!stack.isEmpty() && acc[0] < cap) {
+            File cur = stack.pop();
+            File[] kids = cur.listFiles();
+            if (kids == null) continue;
+            for (File k : kids) {
+                if (acc[0] >= cap) break;
+                if (isSymlink(k)) {
+                    acc[1]++;                   // 是链接：只计数，**不跟进**
+                    continue;
+                }
+                if (k.isDirectory()) {
+                    stack.push(k);
+                } else {
+                    acc[0]++;
+                    acc[2] += k.length();
+                }
+            }
+        }
+        return acc;
+    }
+
+    /**
+     * 给容器命令追加 {@code NODE_OPTIONS=--preserve-symlinks}。
+     *
+     * <h3>什么时候才敢加</h3>
+     * 只有当依赖目录里**一个符号链接都没有**（{@link #layoutOf} 的 symlinks == 0）时。
+     * 那种布局下 realpath(p) === p，这个开关不会改变任何解析结果，
+     * 但能让 Node **跳过每个模块的 realpath 调用** —— 正是 profile 里那 4.6% + 12.6% 的一部分。
+     *
+     * <p>只要有符号链接就**绝对不能加**：`--preserve-symlinks` 会让同一个包经两条路径
+     * 解析成两个模块实例（pnpm 布局下这是已知的坑），后果是插件拿到两份不同的单例。
+     *
+     * <p>刻意**不加** `--preserve-symlinks-main`：容器里的 `/opt/node-…/bin/dsh`
+     * 本身就是指向 bin.js 的符号链接，加了它入口目录会被当成 `bin/`，直接找不到依赖。
+     */
+    public static void preserveSymlinksEnv(java.util.List<String> envPairs) {
+        if (envPairs == null) return;
+        envPairs.add("NODE_OPTIONS=--preserve-symlinks");
+    }
+
+    /**
      * 容器里的组件是否都已就绪。
      *
      * <p>【为什么要连 /usr/bin/env 和 /bin/sh 一起看】这两个是**快速路径的守门人**：

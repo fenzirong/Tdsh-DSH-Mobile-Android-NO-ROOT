@@ -1698,7 +1698,7 @@ public final class Env {
      * 也不能用 {@code java.nio.file.Files.isSymbolicLink} —— 那是 API 26+，
      * 而本 App 的 minSdk 是 24。
      */
-    private static boolean isSymlink(File f) {
+    static boolean isSymlink(File f) {
         try {
             android.system.StructStat st = android.system.Os.lstat(f.getAbsolutePath());
             return android.system.OsConstants.S_ISLNK(st.st_mode);

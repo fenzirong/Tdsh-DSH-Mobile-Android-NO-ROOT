@@ -64,6 +64,17 @@ public class DshService extends Service {
     private static volatile DshService sInstance;
 
     /**
+     * 本次是否**复用**了一个"App 进程死了但容器还活着"的容器。
+     *
+     * <p>为 true 时 {@link #sProcess} 是 null（容器不是我们这次拉起来的），
+     * 但 dsh 确实在跑 —— 所以 {@link #supervise()} 不能把它当成"没容器"再去起一份。
+     */
+    private static volatile boolean sAdopted = false;
+
+    /** 复用记录文件：存上次跑起来的那条带 token 的 URL。 */
+    private static File runningUrlFile(File base) { return new File(base, "running.url"); }
+
+    /**
      * 让服务重建一次它的常驻通知。
      *
      * <p>为什么要这个：通知的强调色和图标是**构建那一刻**定下来的，
@@ -598,7 +609,23 @@ public class DshService extends Service {
         int ticks = 0;
         while (keepRunning) {
             try {
-                if (!isAlive()) {
+                ticks++;
+                if (sAdopted) {
+                    /*
+                     * 复用的容器：每 ~30 秒探一次（本地 HTTP，几百微秒 —— 不穿 proot）。
+                     * 它要是死了，就把复用标记清掉，下一圈正常重新拉起。
+                     */
+                    if (ticks % 6 == 0) {
+                        String u = sUrl;
+                        if (u == null || !probeDsh(u, 900)) {
+                            Log.w(TAG, "复用的容器已不可用，准备重新启动");
+                            appendReport("  · 复用的容器已不可用 → 重新启动容器\n");
+                            sAdopted = false;
+                            sUrl = null;
+                            try { runningUrlFile(Env.base(this)).delete(); } catch (Throwable ignore) { }
+                        }
+                    }
+                } else if (!isAlive()) {
                     startDsh();
                 }
                 /*
@@ -612,7 +639,7 @@ public class DshService extends Service {
                  * 为什么放在独立线程：查 GitHub 要走网络、可能卡十几秒 ——
                  * 绝不能堵住监督循环（那会让容器挂了都不重启）。
                  */
-                if (++ticks % 60 == 0) {
+                if (ticks % 60 == 0) {
                     new Thread(() -> {
                         try { AppUpdate.notifyIfNewer(DshService.this); } catch (Throwable ignore) { }
                     }, "app-update-check").start();
@@ -724,6 +751,15 @@ public class DshService extends Service {
                 return;
             }
             sNeedsProvision = false;
+            /*
+             * ★ 先看看"上次那个容器是不是还活着"（2026-11-17）。
+             *
+             * 这台机器上 dsh 冷启动要 **73 秒**（用户实测：App 侧只占 3 秒）。
+             * 而 App 进程被系统回收时，容器里的 proot/node 经常**还活着** ——
+             * 老逻辑下一启动就 killStaleDsh() 把它杀掉、再从零起一份，
+             * 等于白扔 73 秒。现在先探一下：能连上、token 还有效就直接接管。
+             */
+            if (tryAdoptRunning(base)) return;
             /*
              * 先挑一个**没被占用**的端口。3080 很容易撞车，
              * 而端口被占时 dsh 会直接起不来、监督循环无限重启 ——
@@ -945,8 +981,12 @@ public class DshService extends Service {
                         + Providers.load(this).size() + " 个自定义提供方）\n");
             }
             String[] cmd = Env.dshWebCommand(base, apiKey, tokenDir, relayEnv);
+            // 诊断：状态目录体积（见 logDshStateSizes 的注释），起容器之前记一笔
+            logDshStateSizes(base);
 
             // 起新的之前先把可能残留的旧容器进程清掉（否则 3080 端口会被占住）
+            try { runningUrlFile(base).delete(); } catch (Throwable ignore) { }
+            sAdopted = false;
             int stale = Env.killStaleDsh(base);
             if (stale > 0) Log.i(TAG, "启动前清理残留进程 " + stale + " 个");
 
@@ -972,7 +1012,35 @@ public class DshService extends Service {
                     new InputStreamReader(p.getInputStream(), StandardCharsets.UTF_8))) {
                 String line;
                 int n = 0;
+                /*
+                 * 逐行计时（2026-11-17）：用户实测 dsh 冷启动 73 秒，需要知道这 73 秒
+                 * 是"一路慢"还是"卡在某一步"。做法很简单：
+                 *   · 第一行输出的时刻 = 容器/node 启动到能说话的时间；
+                 *   · 相邻两行间隔超过 3 秒 → 记一条"静默 Ns（上一行是……）"；
+                 *   · 就绪时汇总"首行 / 行数 / 最大静默 + 它出现在哪一行之后"。
+                 * 这三条一出来，是网络阻塞、插件扫描还是纯慢，一眼就分开了。
+                 */
+                long tBootMs = System.currentTimeMillis();
+                long tPrev = tBootMs, maxGap = 0L, tFirstLine = 0L;
+                String maxGapAfter = null, prevLine = null;
                 while ((line = br.readLine()) != null) {
+                    long now = System.currentTimeMillis();
+                    if (n == 0) {
+                        tFirstLine = now;
+                        appendReport("  · [启动] dsh 首行输出 " + (now - tBoot) + "ms\n");
+                    } else {
+                        long gap = now - tPrev;
+                        if (gap > 3000L) {
+                            appendReport("  · [启动] dsh 静默 " + (gap / 1000) + "s（上一行: "
+                                    + clip(prevLine, 60) + "）\n");
+                        }
+                        if (gap > maxGap) {
+                            maxGap = gap;
+                            maxGapAfter = prevLine;
+                        }
+                    }
+                    tPrev = now;
+                    prevLine = line;
                     n++;
                     synchronized (sRecent) {
                         sRecent.addLast(line);
@@ -1005,6 +1073,11 @@ public class DshService extends Service {
                         String picked = UrlPick.pickDshUrl(line);
                         if (picked != null) {
                             sUrl = picked;
+                            saveRunningUrl(base, picked);   // 供下次启动"接管已运行的容器"
+                            appendReport("  · [启动] dsh 计时：首行 " + (tFirstLine - tBoot)
+                                    + "ms · 共 " + n + " 行 · 最大静默 " + (maxGap / 1000.0) + "s"
+                                    + (maxGapAfter != null ? "（在 " + clip(maxGapAfter, 50) + " 之后）" : "")
+                                    + "\n");
                             setState("运行中 · " + hostPortOf(sUrl));
                             appendReport("  dsh 就绪: " + sUrl + "\n");
                             /*
@@ -1024,6 +1097,7 @@ public class DshService extends Service {
                              * 才起得来；而且它得跑在 dsh web 之前或同时，
                              * 否则"客户端先连、代理还没起来"又会回到用户抱怨的那个绕法。
                              */
+                            probeContainerBaselineOnce(base, libDir);
                             Services.startEnabled(DshService.this);
                             Services.startWatchdog(DshService.this);
                             /*
@@ -1123,6 +1197,202 @@ public class DshService extends Service {
         } catch (Throwable e) {
             Log.w(TAG, "ensurePnpmInBackground 异常", e);
         }
+    }
+
+    /* ─────────────────── 复用正在运行的容器 ─────────────────── */
+
+    /**
+     * 尝试**接管**一个已经在跑的容器，而不是杀掉重起。
+     *
+     * <h3>为什么（2026-11-17 用户实测：dsh 冷启动 73 秒）</h3>
+     * 这台机器上 App 侧只花 3 秒，剩下 73 秒全在容器里。而 App 进程被系统回收时，
+     * 容器里的 proot/node 常常**还活着**（它们是独立进程，且 node 的启动代价已经付过）。
+     * 老逻辑一上来就 {@code killStaleDsh()} 把它清掉、再从零起一份 —— 白扔 73 秒。
+     *
+     * <p>现在：上次跑起来时把带 token 的 URL 落到 {@code running.url}；
+     * 本次启动先按它探一下（本地 HTTP，几百微秒，**不穿 proot**）：
+     * 服务端回 200/302/303 就说明"dsh 还活着、token 还有效" → 直接接管。
+     *
+     * <p>为什么用"HTTP + token"而不是"看 pid 还在不在"：pid 可能被系统复用，
+     * 也可能 dsh 进程在但服务器没起来；而**只有我们的 dsh 知道那串 token**，
+     * 能拿它换回 303 就等价于"这就是那台还在跑的 DSH"。
+     *
+     * <p>探测失败（超时/连接被拒/401）就删掉记录，走原来的启动路径 ——
+     * 复用是纯优化，失败绝不影响正确性。
+     */
+    private boolean tryAdoptRunning(File base) {
+        final File f = runningUrlFile(base);
+        if (!f.isFile()) return false;
+        String url = null;
+        try (BufferedReader br = new BufferedReader(
+                new InputStreamReader(new java.io.FileInputStream(f), StandardCharsets.UTF_8))) {
+            url = br.readLine();
+        } catch (Throwable ignore) { }
+        if (url == null || !url.startsWith("http://127.0.0.1:")) {
+            //noinspection ResultOfMethodCallIgnored
+            f.delete();
+            return false;
+        }
+        final long t0 = System.currentTimeMillis();
+        if (!probeDsh(url, 1200)) {
+            appendReport("  · 上次的容器已不在（探测失败）→ 正常启动\n");
+            //noinspection ResultOfMethodCallIgnored
+            f.delete();
+            return false;
+        }
+        sAdopted = true;
+        sUrl = url;
+        setState("运行中 · " + hostPortOf(url));
+        updateNotification("已复用正在运行的容器（无需重启）");
+        appendReport("  · ✅ 复用正在运行的容器（探测 " + (System.currentTimeMillis() - t0)
+                + "ms，省掉一次冷启动）\n");
+        Log.i(TAG, "复用已运行的容器: " + url);
+        return true;
+    }
+
+    /** 把"这次跑起来的 URL"记下来，供下次启动接管（见 {@link #tryAdoptRunning}）。 */
+    private static void saveRunningUrl(File base, String url) {
+        try (java.io.OutputStream os = new java.io.FileOutputStream(runningUrlFile(base), false)) {
+            os.write(url.getBytes(StandardCharsets.UTF_8));
+        } catch (Throwable ignore) { }
+    }
+
+    private static int portOfUrl(String url) {
+        try {
+            int c = url.indexOf(':', "http://127.0.0.1".length());
+            if (c < 0) return -1;
+            int e = url.indexOf('/', c);
+            String p = e > 0 ? url.substring(c + 1, e) : url.substring(c + 1);
+            return Integer.parseInt(p.trim());
+        } catch (Throwable t) {
+            return -1;
+        }
+    }
+
+    /**
+     * 本地探活：对 {@code url}（含 token）发一个最简单的 GET，看状态码。
+     *
+     * <p>只认 200/302/303：DSH 的鉴权流程正是"带 token 的 GET → 303 换 Cookie"，
+     * 所以这三者等价于"服务活着且 token 有效"。401 说明服务在但 token 过期 ——
+     * 那种情况也当成"不可复用"（界面会登不进去）。
+     */
+    private static boolean probeDsh(String url, int timeoutMs) {
+        final int port = portOfUrl(url);
+        if (port <= 0) return false;
+        java.net.Socket sock = new java.net.Socket();
+        try {
+            sock.connect(new java.net.InetSocketAddress("127.0.0.1", port), timeoutMs);
+            sock.setSoTimeout(timeoutMs);
+            int q = url.indexOf('?');
+            String path = q >= 0 ? "/" + url.substring(q) : "/";
+            String req = "GET " + path + " HTTP/1.1\r\n"
+                    + "Host: 127.0.0.1:" + port + "\r\n"
+                    + "Connection: close\r\n\r\n";
+            sock.getOutputStream().write(req.getBytes(StandardCharsets.UTF_8));
+            sock.getOutputStream().flush();
+            BufferedReader br = new BufferedReader(
+                    new InputStreamReader(sock.getInputStream(), StandardCharsets.UTF_8));
+            String status = br.readLine();
+            if (status == null) return false;
+            return status.contains(" 200") || status.contains(" 302") || status.contains(" 303");
+        } catch (Throwable t) {
+            return false;
+        } finally {
+            try { sock.close(); } catch (Throwable ignore) { }
+        }
+    }
+
+    /* ─────────────────── 启动诊断（回答"73 秒花在哪"） ─────────────────── */
+
+    /**
+     * 把 DSH 的状态目录体积写进日志（文件数 + MB）。
+     *
+     * <p>为什么要看这个：容器启动慢有两种完全不同的原因 ——
+     * ① 机器本身慢（CPU/存储）；② **状态太大**（会话/归档/缓存有几万个文件），
+     * dsh 启动时要遍历它们。后者用户在 App 里能处理（删历史对话），
+     * 前者只能靠"别让它冷启动"。没有这几个数字，两种原因分不开。
+     *
+     * <p>走的是普通 Java 文件遍历（**不穿 proot**），并带文件数上限，
+     * 避免这个诊断自己变成新的启动负担。
+     */
+    private void logDshStateSizes(File base) {
+        try {
+            File dsh = new File(base, "rootfs/root/.dsh");
+            if (!dsh.isDirectory()) return;
+            String[] names = {"sessions", "dsh-session-archive", "storages", "cache", "logs", "attachments"};
+            StringBuilder sb = new StringBuilder();
+            for (String n : names) {
+                File d = new File(dsh, n);
+                if (!d.isDirectory()) continue;
+                long[] r = countFiles(d, 20000);
+                if (r[0] <= 0) continue;
+                sb.append("  · [状态] ").append(n).append(": ").append(r[0]).append(" 个文件 / ")
+                        .append(r[1] >> 20).append(" MB\n");
+            }
+            if (sb.length() > 0) appendReport(sb.toString());
+        } catch (Throwable ignore) { }
+    }
+
+    /** 递归统计 {文件数, 总字节}，最多数 {@code cap} 个文件；不跟符号链接。 */
+    private static long[] countFiles(File dir, int cap) {
+        long[] acc = {0, 0};
+        java.util.ArrayDeque<File> stack = new java.util.ArrayDeque<>();
+        stack.push(dir);
+        while (!stack.isEmpty() && acc[0] < cap) {
+            File cur = stack.pop();
+            File[] kids = cur.listFiles();
+            if (kids == null) continue;
+            for (File k : kids) {
+                if (acc[0] >= cap) break;
+                if (Env.isSymlink(k)) continue;          // 不跟进链接（会话目录里可能有指向 /sdcard 的）
+                if (k.isDirectory()) stack.push(k);
+                else {
+                    acc[0]++;
+                    acc[1] += k.length();
+                }
+            }
+        }
+        return acc;
+    }
+
+    /**
+     * 一次性测量"容器里最基础的一次 node 启动"要多久，按 App 版本缓存。
+     *
+     * <p>这一个数字就能把 73 秒分类：
+     * <ul>
+     *   <li>bash+node 冷启动 <b>1~3 秒</b> → 容器机制没问题，73 秒是 dsh 自己加载插件/状态；</li>
+     *   <li>bash+node 就要 <b>10 秒以上</b> → 整台机器上的容器都慢（proot/存储/CPU），
+     *       那 App 侧再怎么优化也只能省那 3 秒。</li>
+     * </ul>
+     *
+     * <p>只在版本变化后测一次（结果进 SharedPreferences），
+     * 所以长期看不增加任何启动成本。
+     */
+    private void probeContainerBaselineOnce(final File base, final String libDir) {
+        try {
+            final int vc = getPackageManager().getPackageInfo(getPackageName(), 0).versionCode;
+            if (getSharedPreferences(PREFS, MODE_PRIVATE).getInt("baseline_vc", -1) == vc) return;
+            new Thread(() -> {
+                try {
+                    long t = System.currentTimeMillis();
+                    Env.execInContainer(DshService.this, "node -e '0'", 90000L, null);
+                    long ms = System.currentTimeMillis() - t;
+                    appendReport("  · [诊断] 容器基线：bash + node 冷启动 " + ms
+                            + "ms（一次性；>8000ms 说明容器本身很慢）\n");
+                    getSharedPreferences(PREFS, MODE_PRIVATE).edit()
+                            .putInt("baseline_vc", vc).apply();
+                } catch (Throwable e) {
+                    Log.w(TAG, "容器基线测量失败", e);
+                }
+            }, "container-baseline").start();
+        } catch (Throwable ignore) { }
+    }
+
+    /** 把一行日志裁短，用于把"静默发生在哪一行之后"写清楚。 */
+    private static String clip(String s, int max) {
+        if (s == null) return "(无)";
+        String t = s.replace('\n', ' ').trim();
+        return t.length() <= max ? t : t.substring(0, max) + "…";
     }
 
     private void setState(String s) { sState = s; }

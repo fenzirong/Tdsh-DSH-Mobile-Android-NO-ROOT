@@ -40,12 +40,12 @@ android {
          * 详见 CHANGELOG 的 v0.4.11-fz1。
          */
         /*
-         * 0.4.13-fz1：修「首次初始化被打断 → 每次启动都从头重来」。
-         * 下载支持断点续传；初始化期间挂前台服务 + 唤醒锁。
-         * 详见 CHANGELOG 的 v0.4.13-fz1。
+         * 0.4.14-fz1：容器还活着就直接接管（省掉一次 73 秒冷启动），
+         * 并补上"73 秒花在哪"的三条诊断。
+         * 详见 CHANGELOG 的 v0.4.14-fz1。
          */
-        versionCode 65
-        versionName "0.4.13-fz1"
+        versionCode 66
+        versionName "0.4.14-fz1"
     }
 
     signingConfigs {

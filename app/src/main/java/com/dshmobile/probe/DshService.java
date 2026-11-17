@@ -997,8 +997,10 @@ public class DshService extends Service {
              * 不过自检就永久回落，并把原因写进设置页 ——
              * 绝不拿"插件市场装不上"去换几秒启动。
              */
-            Env.sRuntime = TawcrootGate.isWanted(this) ? Env.RT_TAWCROOT : Env.RT_PROOT;
-            if (Env.RT_TAWCROOT.equals(Env.sRuntime)) {
+            final String wantRt = TawcrootGate.mode(this);
+            Env.sRuntime = Env.RT_PROOT;                    // 先按最稳的来，下面按设置+自检升级
+            if (Env.RT_TAWCROOT.equals(wantRt)) {
+                Env.sRuntime = Env.RT_TAWCROOT;
                 String gateWhy = TawcrootGate.ensureUsable(this, base, libDir, apiKey, tokenDir);
                 if (gateWhy == null) {
                     appendReport("  · ✅ 运行方式：tawcroot（自检通过；无 ptrace，预期启动更快）\n");
@@ -1007,6 +1009,21 @@ public class DshService extends Service {
                     TawcrootGate.fallback(this, gateWhy);
                     appendReport("  · ⚠️ tawcroot 自检未通过（" + gateWhy
                             + "）→ 本次改用 PRoot（设置里可重新自检）\n");
+                }
+            } else if (Env.RT_TERMUX.equals(wantRt)) {
+                /*
+                 * Termux 原生运行时：bionic node + tawcroot 只做前缀映射。
+                 * 没装用户态就安静退回 PRoot（不打扰用户，也不改设置）。
+                 */
+                Env.sRuntime = Env.RT_TERMUX;
+                String gateWhy = TermuxGate.ensureUsable(this, base);
+                if (gateWhy == null) {
+                    appendReport("  · ✅ 运行方式：Termux 原生（bionic node，无 glibc/无 rootfs 翻译）\n");
+                } else {
+                    Env.sRuntime = Env.RT_PROOT;
+                    TermuxGate.fail(this, gateWhy);
+                    appendReport("  · ⚠️ Termux 原生运行时不可用（" + gateWhy
+                            + "）→ 本次改用 PRoot（设置里可查看状态）\n");
                 }
             }
 

@@ -79,6 +79,11 @@ public final class TawcrootGate {
         return Env.RT_TAWCROOT.equals(mode(c));
     }
 
+    /** 用户是否想用 Termux 原生运行时（同一个 runtime_mode 键的第三个取值）。 */
+    public static boolean isTermuxWanted(Context c) {
+        return Env.RT_TERMUX.equals(mode(c));
+    }
+
     /** 上次自检的人话结论（设置页显示用）。 */
     public static String gateNote(Context c) {
         try {

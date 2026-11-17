@@ -5803,6 +5803,50 @@ public class MainActivity extends Activity {
             } catch (Throwable ignore) { }
         });
 
+        /*
+         * ── Termux 原生运行时（2026-11-18，实验）──────────────────
+         *
+         * 走 bionic node（Termux 那套用户态），不用 glibc、不用 Ubuntu：
+         * 只借 tawcroot 把 Termux 的硬编码前缀绑到我们的目录。
+         * 理论上是最快的一条（系统调用直达内核）。
+         *
+         * 但**用户态需要另行落盘**（files/probe/termux/usr），所以默认没有：
+         * 没装就安静回退 PRoot，这里只负责显示状态与切换。
+         */
+        android.widget.Switch tmx = new android.widget.Switch(this);
+        tmx.setText("Termux 原生运行时（实验）");
+        tmx.setTextSize(13f);
+        tmx.setTextColor(Ui.TEXT);
+        tmx.setChecked(TawcrootGate.isTermuxWanted(this));
+        LinearLayout.LayoutParams tmlp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        tmlp.topMargin = pad / 4;
+        box.addView(tmx, tmlp);
+
+        TextView tmxTip = new TextView(this);
+        tmxTip.setTextSize(11f);
+        tmxTip.setTextColor(Ui.SUB);
+        tmxTip.setText("用 bionic 的 node/bash 直接跑（不经过 glibc 容器），"
+                + "只借 tawcroot 把 Termux 的路径前缀映射过来。\n"
+                + "需要用户态已就位：files/probe/termux/usr/{bin/node,lib/node_modules/@deepseek-ai/dsh}。\n"
+                + "当前：" + TermuxGate.note(this));
+        box.addView(tmxTip);
+        tmx.setOnCheckedChangeListener((v, on) -> {
+            if (on) {
+                TawcrootGate.setMode(this, Env.RT_TERMUX);
+                // 与 tawcroot 互斥：上面那个开关的 UI 也跟着变
+                tawc.setChecked(false);
+                android.widget.Toast.makeText(this, "已选 Termux 原生运行时；下次启动先自检，不通过自动回落 PRoot",
+                        android.widget.Toast.LENGTH_LONG).show();
+            } else {
+                TawcrootGate.setMode(this, Env.RT_PROOT);
+            }
+            appendReport("  [设置] 运行方式 → " + (on ? "termux" : "proot") + "\n");
+            try {
+                if (!isProvisioning() && DshService.isAlive()) DshService.requestRestart();
+            } catch (Throwable ignore) { }
+        });
+
         android.widget.Switch longChat = new android.widget.Switch(this);
         longChat.setText("长对话渲染优化");
         longChat.setTextSize(13f);

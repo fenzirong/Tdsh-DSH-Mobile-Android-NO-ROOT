@@ -40,12 +40,12 @@ android {
          * 详见 CHANGELOG 的 v0.4.11-fz1。
          */
         /*
-         * 0.4.19-fz1：接入 tawcroot 运行时（PRoot 的 seccomp 替代实现），
-         * 带"先自检、不过就回落 PRoot"的闸门，保护插件市场。
-         * 详见 CHANGELOG 的 v0.4.19-fz1。
+         * 0.4.20-fz1：Termux 路线（bionic 原生 node + tawcroot 只做前缀映射），
+         * 带同样的准入闸门；用户态未装则安静回落 PRoot。
+         * 详见 CHANGELOG 的 v0.4.20-fz1 与 docs/termux-route.md。
          */
-        versionCode 71
-        versionName "0.4.19-fz1"
+        versionCode 72
+        versionName "0.4.20-fz1"
     }
 
     signingConfigs {

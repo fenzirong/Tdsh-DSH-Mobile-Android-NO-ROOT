@@ -126,6 +126,25 @@ public final class Env {
      */
     public static final String RT_PROOT = "proot";
     public static final String RT_TAWCROOT = "tawcroot";
+    /**
+     * Termux 路线：用 **bionic 原生 node/bash**（而不是容器里的 glibc 版），
+     * 只借 tawcroot 做两件事 —— 把 Termux 的硬编码前缀映射到我们的目录、
+     * 以及模拟硬链接。没有 Ubuntu、没有 glibc、没有 ptrace。
+     *
+     * <h3>为什么不照抄工作区里那个合并 Termux 的项目</h3>
+     * 它把包名定成 {@code com.dshapp}（10 字节，与 {@code com.termux} 等长），
+     * 于是可以对 bootstrap 与每个 .deb 做**等长字节替换**来搬前缀。
+     * 本 App 的包名是 {@code com.dshmobile.probe}（18 字节），等长替换不成立：
+     * ELF 的 RUNPATH / bash 编译期路径一变长就会破坏偏移。
+     *
+     * <p>所以这里换一种等价的办法：**不动二进制一个字节**，
+     * 用 tawcroot 的 {@code -b} 把 Termux 的前缀
+     * （{@code /data/data/com.termux/files/usr}）**绑到我们自己的目录**上。
+     * 包里硬编码的路径因此全都指对地方，连 shebang 都不用改；
+     * 顺带还解决了原生模式下 {@code link(2)} 被 SELinux 拒绝的问题
+     * （tawcroot 自带硬链接模拟，dsh 的原子写与 pnpm 都靠它）。
+     */
+    public static final String RT_TERMUX = "termux";
     /** 当前进程实际使用的运行时（由 DshService 在启动时按设置+自检结果决定）。 */
     public static volatile String sRuntime = RT_PROOT;
 
@@ -136,6 +155,31 @@ public final class Env {
 
     /** tawcroot 的硬链接仓库：按上游约定在 {@code <rootfs>/../tawcroot}。 */
     public static File tawcrootStore(File base) { return new File(base, "tawcroot"); }
+
+    /** Termux 用户态的根（bionic 的 bin/lib/etc，按 Termux 的布局）。 */
+    public static File termuxPrefix(File base) { return new File(new File(base, "termux"), "usr"); }
+
+    /** Termux 用户态里 node / dsh 的位置（bundled dsh 装在 prefix 下）。 */
+    public static File termuxNode(File base) { return new File(termuxPrefix(base), "bin/node"); }
+
+    /** Termux 用户态里的 dsh CLI 入口（node 直接跑这个 js）。 */
+    public static File termuxDshJs(File base) {
+        return new File(termuxPrefix(base),
+                "lib/node_modules/@deepseek-ai/dsh/lib/bin.js");
+    }
+
+    /** Termux 路线的 HOME（dsh 的 ~/.dsh 落在这里，与容器那套完全隔离）。 */
+    public static File termuxHome(File base) { return new File(new File(base, "termux"), "home"); }
+
+    /**
+     * Termux 用户态是否已就位（有 bionic node、有 dsh、目录结构完整）。
+     *
+     * <p>刻意**只检查文件存在**：真正的能力由 TermuxGate 在容器里跑自检决定，
+     * 这里只是"要不要尝试"的门槛 —— 没装就安静地退回 PRoot。
+     */
+    public static boolean termuxInstalled(File base) {
+        return termuxNode(base).exists() && termuxDshJs(base).exists();
+    }
 
     /** 手机控制 CLI 在容器里的安装位置。 */
     public static final String PHONE_CLI_PATH = "/usr/local/bin/phone";
@@ -405,6 +449,9 @@ public final class Env {
     public static String[] containerCommand(File base, String apiKey, String phoneTokenDir,
                                             String exe, java.util.List<String> args,
                                             java.util.List<String> extraEnv) {
+        if (RT_TERMUX.equals(sRuntime)) {
+            return termuxCommand(base, apiKey, phoneTokenDir, exe, args, extraEnv);
+        }
         if (RT_TAWCROOT.equals(sRuntime)) {
             return tawcrootCommand(base, apiKey, phoneTokenDir, exe, args, extraEnv);
         }
@@ -492,6 +539,118 @@ public final class Env {
         }
         a.add(exe);
         a.addAll(args);
+        return a.toArray(new String[0]);
+    }
+
+    /**
+     * Termux 路线：用 bionic 原生 node 跑 dsh，只借 tawcroot 做前缀映射与硬链接。
+     *
+     * <h3>布局</h3>
+     * <pre>
+     *   files/probe/termux/usr   ← 用户态（从 Termux 的 bootstrap / 软件包解出来）
+     *                            ← 在 guest 里**出现**为 /data/data/com.termux/files/usr
+     *   files/probe/termux/home  ← HOME，dsh 的 ~/.dsh 在这里
+     *   files/probe/termux/root  ← 空的"根"，只为了让 tawcroot 有 -r 可指
+     * </pre>
+     *
+     * <h3>为什么这份命令里没有 Ubuntu</h3>
+     * Termux 的二进制是 **bionic** 编译的，能直接在 Android 上跑（不需要 glibc），
+     * 但它们把 {@code /data/data/com.termux/files/usr} 硬编码进了 RUNPATH 与脚本 shebang。
+     * 我们不打算改这些字节（包名长度不同，等长替换不可行），
+     * 而是把我们的目录**绑到那个路径上** —— 于是所有硬编码路径天然正确，
+     * 一个字节都不用补丁。
+     *
+     * <h3>与容器路线的差别</h3>
+     * 没有 rootfs 翻译（除了那一条前缀绑定），没有 glibc loader，
+     * 也没有 dsh 的"手机文件"路径差异：{@code /sdcard} 本来就是手机共享存储。
+     */
+    public static String[] termuxCommand(File base, String apiKey, String phoneTokenDir,
+                                         String exe, java.util.List<String> args,
+                                         java.util.List<String> extraEnv) {
+        final String PREFIX = "/data/data/com.termux/files/usr";   // Termux 的硬编码前缀（guest 视角）
+        String hostPrefix = termuxPrefix(base).getAbsolutePath();
+        String hostHome = termuxHome(base).getAbsolutePath();
+        File root = new File(new File(base, "termux"), "root");
+        //noinspection ResultOfMethodCallIgnored
+        root.mkdirs();
+
+        java.util.ArrayList<String> a = new java.util.ArrayList<>();
+        a.add(tawcrootBin(base).getAbsolutePath());          // 复用已随包的 tawcroot
+        a.add("-r"); a.add(root.getAbsolutePath());
+        /*
+         * 关键的一条：把"Termux 认为的 prefix"绑到我们的目录。
+         * 只绑定这一条，外加 /system（linker 与 toybox）与 /sdcard，别的不需要。
+         */
+        a.add("-b"); a.add(hostPrefix + ":" + PREFIX);
+        a.add("-b"); a.add(hostHome + ":/root");
+        a.add("-b"); a.add("/system:/system");
+        a.add("-b"); a.add("/dev:/dev");
+        a.add("-b"); a.add("/proc:/proc");
+        a.add("-b"); a.add("/sys:/sys");
+        a.add("-b"); a.add(SDCARD_HOST + ":" + SDCARD_GUEST);
+        a.add("-b"); a.add(SDCARD_HOST + ":" + SDCARD_HOST);
+        if (phoneTokenDir != null && !phoneTokenDir.isEmpty()) {
+            a.add("-b"); a.add(phoneTokenDir + ":" + PHONE_RUN_DIR + ":ro");
+        }
+        a.add("-b"); a.add(base.getAbsolutePath() + ":" + APPDATA_GUEST);
+
+        StringBuilder inner = new StringBuilder();
+        inner.append("cd ").append(shellQuote(WORKSPACE)).append(" 2>/dev/null || true; exec");
+        inner.append(' ').append(shellQuote(PREFIX + "/bin/env"));
+        inner.append(" -i HOME=/root");
+        inner.append(" PREFIX=").append(shellQuote(PREFIX));
+        inner.append(" TMPDIR=").append(shellQuote(PREFIX + "/tmp"));
+        inner.append(" TERM=xterm-256color LANG=C.UTF-8");
+        inner.append(" PATH=").append(shellQuote(PREFIX + "/bin:" + PREFIX + "/bin/applets:/system/bin"));
+        inner.append(" DSH_PERMISSION_MODE=danger-full-access");
+        inner.append(" DSH_PHONE_RUN=").append(shellQuote(PHONE_RUN_DIR));
+        inner.append(" DSH_PHONE_PORT=").append(PhoneBridge.PORT);
+        if (apiKey != null && !apiKey.trim().isEmpty()) {
+            inner.append(" DEEPSEEK_API_KEY=").append(shellQuote(apiKey.trim()));
+        }
+        if (extraEnv != null) {
+            for (String kv : extraEnv) {
+                if (kv == null || kv.trim().isEmpty()) continue;
+                int eq = kv.indexOf('=');
+                if (eq <= 0) continue;
+                inner.append(' ').append(kv, 0, eq + 1).append(shellQuote(kv.substring(eq + 1)));
+            }
+        }
+        /*
+         * 可执行文件的映射：容器里的路径在 Termux 世界里大多不存在
+         * （我们只绑了 PREFIX + /system），所以按"用途"翻译：
+         *   · dsh → PREFIX/bin/node + PREFIX/lib/node_modules/@deepseek-ai/dsh/lib/bin.js
+         *   · /bin/bash、/bin/sh、/usr/bin/env → PREFIX/bin/…
+         * 探针（execInContainer 用的是 /bin/bash -lc）走的也是这条映射。
+         */
+        final boolean isDsh = exe != null
+                && (exe.endsWith("/bin/dsh") || exe.contains("@deepseek-ai/dsh"));
+        String guestExe;
+        java.util.ArrayList<String> guestArgs = new java.util.ArrayList<>();
+        if (isDsh) {
+            guestExe = PREFIX + "/bin/node";
+            guestArgs.add(PREFIX + "/lib/node_modules/@deepseek-ai/dsh/lib/bin.js");
+        } else if (exe == null) {
+            guestExe = PREFIX + "/bin/sh";
+        } else if (exe.startsWith("/opt/")) {
+            guestExe = PREFIX + "/bin/node";                 // 容器里的 node 绝对路径
+        } else if (exe.equals("/bin/bash")) {
+            guestExe = PREFIX + "/bin/bash";
+        } else if (exe.equals("/bin/sh")) {
+            guestExe = PREFIX + "/bin/sh";
+        } else if (exe.equals("/usr/bin/env")) {
+            guestExe = PREFIX + "/bin/env";
+        } else {
+            guestExe = exe;
+        }
+        if (args != null) guestArgs.addAll(args);
+
+        inner.append(' ').append(shellQuote(guestExe));
+        for (String s : guestArgs) inner.append(' ').append(shellQuote(s));
+        a.add("--");
+        a.add("/bin/sh");
+        a.add("-c");
+        a.add(inner.toString());
         return a.toArray(new String[0]);
     }
 

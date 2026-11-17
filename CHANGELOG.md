@@ -6,6 +6,73 @@
 
 ---
 
+## v0.4.20-fz1
+
+（`versionCode 71 → 72`。按工作区里那个「合并 Termux」项目与 TAWC/dsh-go 的做法，
+接上 **Termux 路线**：bionic 原生 node 直接跑 dsh。用户态未安装时安静回落 PRoot。）
+
+### 参考项目给了什么，以及哪一步不能照抄
+
+工作区 `dsh-mobile`（合并 Termux 版）已经把这条链路走通了，可直接借鉴：
+
+| 借鉴点 | 说明 |
+| --- | --- |
+| 内置 bootstrap | 官方 `bootstrap-aarch64.zip`（30.7 MB）编进 `libtermux-bootstrap.so`，首次启动离线解压 |
+| 装包前改写 | apt 的 `DPkg::Pre-Invoke` 钩子 → `dpkg-deb -R` 解包 → 改名/替换 → `dpkg-deb -b -Zgzip -z1` 重打包 |
+| 重打包用 gzip -1 | 实测 48 MB 的 nodejs 包：`xz -6` **45.8 s** vs `gzip -1` **1.3 s**（35 倍） |
+| 启停 | 后台跑脚本写阶段码，App 每 800 ms 轮询 token URL；后端已在跑就复用 |
+
+**但它的关键技巧我们不能用**：它把包名定成 `com.dshapp`（**10 字节**），
+与 `com.termux`（10 字节）等长，于是可以对 bootstrap 与每个 .deb 做**等长字节替换**。
+本 App 的包名是 `com.dshmobile.probe`（**18 字节**），一变长就会破坏 ELF 的
+`DT_RUNPATH` 与 bash 的编译期路径（`.rodata` 偏移）。
+
+### 我们的接法：一个字节都不补丁，用 tawcroot 把前缀绑过来
+
+```
+tawcroot -r <空根> \
+  -b files/probe/termux/usr : /data/data/com.termux/files/usr \
+  -b files/probe/termux/home : /root \
+  -b /system -b /dev -b /proc -b /sys -b /sdcard … \
+  -- /bin/sh -c 'cd /sdcard/dsh && exec $PREFIX/bin/node …/dsh/lib/bin.js --profile web …'
+```
+
+于是 Termux 二进制里那些硬编码路径**天然全部指对地方**，连 shebang 都不用改；
+顺带还解决了原生模式下 `link(2)` 被 SELinux 拒绝的问题
+（dsh 的原子写与 pnpm 都依赖硬链接，tawcroot 自带模拟）。
+
+代价：仍会经过 tawcroot 的 seccomp（只在命中前缀绑定的路径上，且是**进程内**处理，
+比 ptrace 便宜一个量级）；单进程 → 与 tawcroot 同样的"没有隔离"取舍。
+
+### 这一版落了什么
+
+| 组件 | 状态 |
+| --- | --- |
+| `Env.RT_TERMUX` / `termuxCommand()`（tawcroot + 前缀绑定 + bionic node） | ✅ |
+| `Env.termuxInstalled()`（只检查 `termux/usr/bin/node` 与 dsh 入口） | ✅ |
+| `TermuxGate` 准入闸门（node/bash/dsh + 硬链接/符号链接/exec//proc//sdcard/pnpm） | ✅ |
+| 设置项「Termux 原生运行时（实验）」+ 状态显示 | ✅ 默认关 |
+| **用户态安装器**（下载 Termux 包并解包） | ⬜ 未做，见下 |
+
+**为什么没把 30MB 用户态塞进 APK**：那是第三方 arm64 二进制，而我这边没有
+arm64 真机可跑，无法验证。按本项目一贯的规矩（没验证的东西不随包发），
+这一版只落"骨架 + 闸门 + 文档"，用户态由 `tools/termux/README.md` 里的手工路径验一次，
+再决定是否做成"首次启动自动下载安装"。
+
+### 怎么验
+
+1. 按 `tools/termux/README.md` 把 `usr/` 放进 `files/probe/termux/`；
+2. 设置 → 打开「Termux 原生运行时（实验）」→ 重启 App；
+3. `report.txt` 会出现二者之一：
+   - `· ✅ 运行方式：Termux 原生（bionic node，无 glibc/无 rootfs 翻译）`
+   - `· ⚠️ Termux 原生运行时不可用（GATE_FAIL_xxx）→ 本次改用 PRoot`
+4. 无论哪条，**功能都不受影响**（闸门不过就回落 PRoot）；
+5. 插件市场回归：装一个纯 JS 插件确认能装能生效。
+
+详见 `docs/termux-route.md`（含三条路线的代价对比与后续自动化计划）。
+
+---
+
 ## v0.4.19-fz1
 
 （`versionCode 70 → 71`。接上 **tawcroot** 运行时：把"每次 stat 都 ptrace 停一次"换成进程内 seccomp 模拟。

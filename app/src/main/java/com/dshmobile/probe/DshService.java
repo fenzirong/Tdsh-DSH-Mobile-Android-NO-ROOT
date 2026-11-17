@@ -41,6 +41,15 @@ public class DshService extends Service {
     public static final String KEY_API = "deepseek_api_key";
 
     /**
+     * 服务指令：「跑一次启动诊断」（用户从设置里点）。
+     *
+     * <p>为什么走服务指令而不是 Activity 自己直接跑：诊断要起 proot + node
+     * （容器基线那一步），需要和服务共用同一个上下文与串行化；而且它跑在
+     * 服务线程里、用完即走，不影响 Activity 的生命周期。
+     */
+    public static final String ACTION_DIAG = "com.dshmobile.probe.action.DIAG";
+
+    /**
      * 通知栏那个「悬浮球」按钮的动作。
      *
      * <p>悬浮球不是 Service 了（见 {@link BallWindow} 类注释），所以这里用广播，
@@ -382,6 +391,10 @@ public class DshService extends Service {
 
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
+        if (intent != null && ACTION_DIAG.equals(intent.getAction())) {
+            runDiagnosticsNow();
+            return START_STICKY;
+        }
         // 灵动岛（实时进度悬浮条）：DSH 起来就按用户保存的开关恢复；关过的不再自动开
         HudOverlayService.restore(this);
         return START_STICKY;
@@ -994,8 +1007,14 @@ public class DshService extends Service {
                 appendReport("  · 依赖布局无符号链接 → 已启用 --preserve-symlinks\n");
             }
             String[] cmd = Env.dshWebCommand(base, apiKey, tokenDir, relayEnv);
-            // 诊断：状态目录体积（见 logDshStateSizes 的注释），起容器之前记一笔
-            logDshStateSizes(base);
+            /*
+             * ⚠️ 这里**不放任何诊断**（2026-11-17 回归修复）。
+             *
+             * 0.4.16 把 `logDshStateSizes()` 放在了这一行 —— 它要遍历 `.dsh/sessions`
+             * 等目录（上限 2 万个文件），而这一行正好在"起容器"的**前面**：
+             * 用户实测启动反而慢了几秒。诊断再便宜，也不能待在关键路径上。
+             * 现在全部挪到 {@link #deferDiagnostics}（就绪后 40 秒、后台线程、低优先级）。
+             */
 
             // 起新的之前先把可能残留的旧容器进程清掉（否则 3080 端口会被占住）
             try { runningUrlFile(base).delete(); } catch (Throwable ignore) { }
@@ -1116,8 +1135,7 @@ public class DshService extends Service {
                              * 才起得来；而且它得跑在 dsh web 之前或同时，
                              * 否则"客户端先连、代理还没起来"又会回到用户抱怨的那个绕法。
                              */
-                            probeContainerBaselineOnce(base, libDir);
-                            measureLayoutOnce(base);
+                            deferDiagnostics(base);
                             Services.startEnabled(DshService.this);
                             Services.startWatchdog(DshService.this);
                             /*
@@ -1344,7 +1362,7 @@ public class DshService extends Service {
             for (String n : names) {
                 File d = new File(dsh, n);
                 if (!d.isDirectory()) continue;
-                long[] r = countFiles(d, 20000);
+                long[] r = countFiles(d, 3000);
                 if (r[0] <= 0) continue;
                 sb.append("  · [状态] ").append(n).append(": ").append(r[0]).append(" 个文件 / ")
                         .append(r[1] >> 20).append(" MB\n");
@@ -1389,6 +1407,68 @@ public class DshService extends Service {
      * 所以长期看不增加任何启动成本。
      */
     /**
+     * 用户主动点的「启动诊断」：布局、状态目录、容器基线，一次性跑完写进日志。
+     *
+     * <p>三项里**容器基线要起一次 proot + node**（真机几秒），所以只能按需触发，
+     * 绝不能自动执行（那等于每次启动多背一次容器启动）。
+     */
+    void runDiagnosticsNow() {
+        new Thread(() -> {
+            try {
+                android.os.Process.setThreadPriority(
+                        android.os.Process.THREAD_PRIORITY_BACKGROUND);
+                final File base = Env.base(this);
+                appendReport("\n=== 启动诊断（用户触发）===\n");
+                logDshStateSizes(base);
+                measureLayoutOnceNow(base);
+                long t = System.currentTimeMillis();
+                Env.execInContainer(DshService.this, "node -e '0'", 90000L, null);
+                appendReport("  · [诊断] 容器基线：bash + node 冷启动 "
+                        + (System.currentTimeMillis() - t)
+                        + "ms（>8000ms 说明容器本身很慢）\n");
+                appendReport("=== 诊断结束（点「复制启动日志」可一次带走）===\n");
+            } catch (Throwable e) {
+                Log.w(TAG, "启动诊断失败", e);
+            }
+        }, "dsh-diag-manual").start();
+    }
+
+    /**
+     * 把诊断**推到后台、并且推迟**，绝不和"页面加载"抢 CPU/IO。
+     *
+     * <h3>为什么要这样（2026-11-17 回归修复）</h3>
+     * 0.4.16 的两个诊断（状态目录遍历、依赖布局遍历）都在"容器一就绪"就开跑，
+     * 而那一刻正是 WebView 加载 DSH 前端（长对话要 7~8 秒）最吃 CPU/IO 的时候；
+     * 用户实测：**改完反而慢了几秒**。诊断的价值远小于它抢占的这几秒。
+     *
+     * <p>现在：
+     * <ul>
+     *   <li>推迟 {@link #DIAG_DELAY_MS}（40 秒）再跑 —— 那时页面早已稳定；</li>
+     *   <li>线程优先级降到 BACKGROUND（{@code Process.setThreadPriority}），
+     *       即便真和什么撞上，也是让着别人的那一方；</li>
+     *   <li>进程被杀就没了也不要紧 —— 诊断只是日志，不影响任何功能。</li>
+     * </ul>
+     */
+    private void deferDiagnostics(final File base) {
+        new Thread(() -> {
+            try {
+                android.os.Process.setThreadPriority(
+                        android.os.Process.THREAD_PRIORITY_BACKGROUND);
+                Thread.sleep(DIAG_DELAY_MS);
+                logDshStateSizes(base);
+                measureLayoutOnceNow(base);
+            } catch (InterruptedException ie) {
+                // 无需处理：被打断就说明进程要走了
+            } catch (Throwable t) {
+                Log.w(TAG, "延迟诊断失败（不影响任何功能）", t);
+            }
+        }, "dsh-diagnostics").start();
+    }
+
+    /** 诊断整体推迟多久（毫秒）。 */
+    private static final long DIAG_DELAY_MS = 40000L;
+
+    /**
      * 依赖布局诊断：数一数 profile 与全局安装里的「文件数 / 符号链接数」。
      *
      * <p>为什么值得单独测（用户 2026-11-17 的真机 profile）：dsh 冷启动 59 秒里
@@ -1399,14 +1479,14 @@ public class DshService extends Service {
      *
      * <p>走 App 自己的文件 API（**不穿 proot**），按版本只测一次。
      */
-    private void measureLayoutOnce(final File base) {
+    private void measureLayoutOnceNow(final File base) {
         try {
             final int vc = getPackageManager().getPackageInfo(getPackageName(), 0).versionCode;
             if (getSharedPreferences(PREFS, MODE_PRIVATE).getInt("layout_vc", -1) == vc) return;
-            new Thread(() -> {
+            {
                 try {
-                    long[] hd = Env.layoutOf(new File(base, "rootfs/root/.dsh/profiles/web/node_modules"), 40000);
-                    long[] gl = Env.layoutOf(new File(base, "rootfs/opt/" + Env.NODE_DIR + "/lib/node_modules"), 40000);
+                    long[] hd = Env.layoutOf(new File(base, "rootfs/root/.dsh/profiles/web/node_modules"), 6000);
+                    long[] gl = Env.layoutOf(new File(base, "rootfs/opt/" + Env.NODE_DIR + "/lib/node_modules"), 6000);
                     long links = hd[1] + gl[1];
                     appendReport("  · [布局] 依赖文件 " + (hd[0] + gl[0]) + " 个 · 符号链接 " + links
                             + " 个 · 合计 " + ((hd[2] + gl[2]) >> 20) + " MB"
@@ -1426,7 +1506,7 @@ public class DshService extends Service {
                 } catch (Throwable t) {
                     Log.w(TAG, "依赖布局测量失败", t);
                 }
-            }, "layout-probe").start();
+            }
         } catch (Throwable ignore) { }
     }
 
@@ -1441,24 +1521,27 @@ public class DshService extends Service {
         }
     }
 
-    private void probeContainerBaselineOnce(final File base, final String libDir) {
-        try {
-            final int vc = getPackageManager().getPackageInfo(getPackageName(), 0).versionCode;
-            if (getSharedPreferences(PREFS, MODE_PRIVATE).getInt("baseline_vc", -1) == vc) return;
-            new Thread(() -> {
-                try {
-                    long t = System.currentTimeMillis();
-                    Env.execInContainer(DshService.this, "node -e '0'", 90000L, null);
-                    long ms = System.currentTimeMillis() - t;
-                    appendReport("  · [诊断] 容器基线：bash + node 冷启动 " + ms
-                            + "ms（一次性；>8000ms 说明容器本身很慢）\n");
-                    getSharedPreferences(PREFS, MODE_PRIVATE).edit()
-                            .putInt("baseline_vc", vc).apply();
-                } catch (Throwable e) {
-                    Log.w(TAG, "容器基线测量失败", e);
-                }
-            }, "container-baseline").start();
-        } catch (Throwable ignore) { }
+    /**
+     * 容器基线：在容器里跑一次 {@code node -e '0'} 并用它的耗时判断"这台机器的容器有多慢"。
+     *
+     * <p><b>只在用户主动点「🧪 启动诊断」时跑</b>（2026-11-17 改）。
+     * 它会**起一个 proot + node**（真机上几秒 CPU），绝不能自动执行 ——
+     * 那就等于每次启动都多背一次容器启动。
+     */
+    void probeContainerBaselineNow(final File base, final String libDir) {
+        new Thread(() -> {
+            try {
+                android.os.Process.setThreadPriority(
+                        android.os.Process.THREAD_PRIORITY_BACKGROUND);
+                long t = System.currentTimeMillis();
+                Env.execInContainer(DshService.this, "node -e '0'", 90000L, null);
+                appendReport("  · [诊断] 容器基线：bash + node 冷启动 "
+                        + (System.currentTimeMillis() - t)
+                        + "ms（>8000ms 说明容器本身很慢）\n");
+            } catch (Throwable e) {
+                Log.w(TAG, "容器基线测量失败", e);
+            }
+        }, "container-baseline").start();
     }
 
     /** 把一行日志裁短，用于把"静默发生在哪一行之后"写清楚。 */

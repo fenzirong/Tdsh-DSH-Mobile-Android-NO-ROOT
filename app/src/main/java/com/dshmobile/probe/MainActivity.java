@@ -5707,6 +5707,37 @@ public class MainActivity extends Activity {
         logBtn.setOnClickListener(v -> copyLogToClipboard());
 
         /*
+         * 「启动诊断」—— 2026-11-17 加。
+         *
+         * 为什么做成按钮：诊断里有一项是"在容器里跑一次 node"（测容器基线），
+         * 那要起一个 proot + node、真机几秒 —— **绝不能自动跑**，否则等于每次启动
+         * 都多背一次容器启动（0.4.16 就是这么把启动拖慢了几秒）。
+         * 改成用户点了才跑，跑完日志里写清楚，再点上面的「复制启动日志」就能发出来。
+         */
+        TextView diagBtn = new TextView(this);
+        diagBtn.setText("🧪 启动诊断（布局 / 状态体积 / 容器基线）");
+        diagBtn.setTextSize(13f);
+        diagBtn.setTextColor(Ui.ACCENT);
+        diagBtn.setPadding(pad / 2, pad / 2, pad / 2, pad / 2);
+        LinearLayout.LayoutParams dlp2 = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        dlp2.topMargin = pad / 4;
+        box.addView(diagBtn, dlp2);
+        diagBtn.setOnClickListener(v -> {
+            try {
+                Intent it = new Intent(this, DshService.class);
+                it.setAction(DshService.ACTION_DIAG);
+                startService(it);
+                android.widget.Toast.makeText(this,
+                        "诊断已开始（约 1 分钟）· 完成后点上面「复制启动日志」",
+                        android.widget.Toast.LENGTH_LONG).show();
+            } catch (Throwable t) {
+                android.widget.Toast.makeText(this, "诊断启动失败: " + t.getMessage(),
+                        android.widget.Toast.LENGTH_LONG).show();
+            }
+        });
+
+        /*
          * 长对话渲染优化开关（默认开）。
          *
          * 它给网页侧的消息列表加 content-visibility:auto —— 屏幕外的消息不再参与

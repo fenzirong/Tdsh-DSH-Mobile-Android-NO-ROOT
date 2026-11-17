@@ -40,12 +40,12 @@ android {
          * 详见 CHANGELOG 的 v0.4.11-fz1。
          */
         /*
-         * 0.4.16-fz1：依赖布局诊断（符号链接数）+ 零链接时自动启用
-         * --preserve-symlinks。依据是真机 V8 profile：86% 时间在路径类系统调用。
-         * 详见 CHANGELOG 的 v0.4.16-fz1。
+         * 0.4.17-fz1：修 0.4.16 引入的启动变慢 —— 诊断挪出关键路径
+         * （就绪后 40 秒、后台优先级），容器基线改为用户点按钮才跑。
+         * 详见 CHANGELOG 的 v0.4.17-fz1。
          */
-        versionCode 68
-        versionName "0.4.16-fz1"
+        versionCode 69
+        versionName "0.4.17-fz1"
     }
 
     signingConfigs {

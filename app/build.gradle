@@ -40,12 +40,12 @@ android {
          * 详见 CHANGELOG 的 v0.4.11-fz1。
          */
         /*
-         * 0.4.14-fz1：容器还活着就直接接管（省掉一次 73 秒冷启动），
-         * 并补上"73 秒花在哪"的三条诊断。
-         * 详见 CHANGELOG 的 v0.4.14-fz1。
+         * 0.4.15-fz1：长对话卡顿（content-visibility + 去掉几处 O(n) 周期扫描）、
+         * 去掉 API Key 弹窗与通知栏里的"未设置 API Key"。
+         * 详见 CHANGELOG 的 v0.4.15-fz1。
          */
-        versionCode 66
-        versionName "0.4.14-fz1"
+        versionCode 67
+        versionName "0.4.15-fz1"
     }
 
     signingConfigs {

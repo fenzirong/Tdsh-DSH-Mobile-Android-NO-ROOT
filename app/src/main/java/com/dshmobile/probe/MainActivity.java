@@ -2,7 +2,9 @@ package com.dshmobile.probe;
 
 import android.app.Activity;
 import android.app.AlertDialog;
+import android.content.Context;
 import android.content.Intent;
+import android.content.SharedPreferences;
 import android.graphics.Color;
 import android.os.Build;
 import android.os.Bundle;
@@ -1508,20 +1510,57 @@ public class MainActivity extends Activity {
      *   · 容器已就绪 → 照旧弹对话框（这里改 Key 最方便）
      *   · 容器还没装好 → 只在日志区写一行引导，让用户先等安装完成
      */
+    /**
+     * 没有 API Key 时的提示。
+     *
+     * <h3>为什么不再自动弹设置框（2026-11-17，用户要求"去掉每次启动时的弹窗"）</h3>
+     * 原来的行为是：只要没填 Key，**每次启动**都在容器就绪后 600ms 自动弹出设置对话框。
+     * 这对"用中转站/自定义提供方、根本没打算填 DeepSeek 官方 Key"的用户是纯打扰 ——
+     * 每次打开 App 都被一个对话框挡一下，还得手动关掉。
+     *
+     * <p>现在：**一次都不弹**。只在**第一次**（用 prefs 记一笔）往日志区写一行提示，
+     * 之后完全静默；需要填 Key 的人自己点右上角「设置」（那个入口一直都在）。
+     */
     private void maybePromptApiKey() {
-        String k = DshService.getApiKey(this);
-        if (k != null && !k.trim().isEmpty()) return;
+        try {
+            String k = DshService.getApiKey(this);
+            if (k != null && !k.trim().isEmpty()) return;
+            SharedPreferences sp = getSharedPreferences(DshService.PREFS, MODE_PRIVATE);
+            if (sp.getBoolean(KEY_KEY_HINTED, false)) return;      // 已经提示过，彻底静默
+            sp.edit().putBoolean(KEY_KEY_HINTED, true).apply();
+            output.postDelayed(() -> output.append(
+                    "\n提示：还没填 DeepSeek API Key。需要的话点右上角「设置」填入；"
+                  + "用中转站/自定义提供方的话可以忽略这条。\n"), 800);
+        } catch (Throwable ignore) { }
+    }
 
-        if (isContainerReady()) {
-            output.postDelayed(this::showSettingsDialog, 600);
-        } else {
-            // 首次运行：把引导写进日志区，别用对话框打断初始化
-            output.postDelayed(() -> {
-                if (isContainerReady()) { showSettingsDialog(); return; }
-                output.append("\n提示：还没填 DeepSeek API Key。"
-                        + "可以现在点右上角「设置」填入，也可以等容器装好后在 DSH 设置里填。\n");
-            }, 800);
+    /** "API Key 提示只提示一次"的标记（见 maybePromptApiKey）。 */
+    private static final String KEY_KEY_HINTED = "api_key_hinted";
+
+    /**
+     * 长对话渲染优化开关（设置里可关）。
+     *
+     * <p>给网页侧读：{@code DshAndroid.longChatOpt()}。关掉后注入的补丁不会给
+     * 消息列表加 {@code content-visibility} —— 万一某些机型上出现滚动跳动，
+     * 用户有一个明确的退路，而不是只能卸载。
+     */
+    private static final String KEY_LONGCHAT_OPT = "longchat_opt";
+
+    /** 默认**开**：长对话卡顿是普遍问题，优化默认生效。 */
+    static boolean longChatOpt(Context c) {
+        try {
+            return c.getSharedPreferences(DshService.PREFS, Context.MODE_PRIVATE)
+                    .getBoolean(KEY_LONGCHAT_OPT, true);
+        } catch (Throwable t) {
+            return true;
         }
+    }
+
+    static void setLongChatOpt(Context c, boolean on) {
+        try {
+            c.getSharedPreferences(DshService.PREFS, Context.MODE_PRIVATE)
+                    .edit().putBoolean(KEY_LONGCHAT_OPT, on).apply();
+        } catch (Throwable ignore) { }
     }
 
     /** 容器是否已经装好（有 rootfs + Node + dsh）。 */
@@ -1824,29 +1863,54 @@ public class MainActivity extends Activity {
      * <p>{@code textContent} 只读文本节点的长度，**不触发任何布局**。
      * 判白屏只需要"是不是几乎没字"，两者在这一点上完全等价。
      */
+    /*
+     * 白屏判定改为 **O(1)**（2026-11-17，修"长对话严重卡顿"）。
+     *
+     * 原来是每次（5 秒）读一遍 `document.body.textContent.length`。
+     * 对短页面没事，可它是 **O(全部文本)** 的：长对话里几 MB 的正文 + 工具卡片，
+     * 每 5 秒就要把整棵 DOM 的文字**拼成一个字符串**（还要分配几 MB 内存），
+     * 这本身就是持续卡顿与 GC 抖动的来源之一（作者之前已经从 innerText 改成
+     * textContent，理由是 innerText 会强制重排；但 textContent 依然要遍历全树）。
+     *
+     * 现在换成"问页面最后一次 DOM 变动是什么时候"：
+     * 那个时间戳由注入补丁里的 MutationObserver 顺手维护（它本来就在跑），
+     * 读取是 O(1)。语义也更准 —— 白屏的本质就是"很久没有任何东西动过"。
+     */
     private void probeBlank() {
         if (webView == null || webView.getVisibility() != View.VISIBLE) return;
         webView.evaluateJavascript(
-                "(function(){try{var b=document.body;"
-              + "if(!b)return 0;"
-              + "return (b.textContent||'').length;}catch(e){return -1;}})()",
+                /*
+                 * 只在**页面已经安静下来**（20 秒没有 DOM 变动）时才去量一次正文长度，
+                 * 量过之后一分钟内复用结果；页面正在动的时候直接判"活着"，
+                 * 一次 textContent 都不读 —— 流式输出时这个判断是零成本的。
+                 */
+                "(function(){try{"
+              + "var b=document.body;if(!b)return 0;"
+              + "var now=Date.now(),mut=window.__dshLastMutAt||0;"
+              + "if(mut&&(now-mut)<20000)return 1;"
+              + "if(window.__dshTextLenAt&&(now-window.__dshTextLenAt)<60000)"
+              + "  return ((window.__dshTextLen|0)>20)?1:0;"
+              + "var len=(b.textContent||'').length;"
+              + "window.__dshTextLen=len;window.__dshTextLenAt=now;"
+              + "return len>20?1:0;"
+              + "}catch(e){return -1;}})()",
                 value -> {
-                    int len;
+                    int ok;
                     try {
-                        len = (int) Double.parseDouble(String.valueOf(value)
+                        ok = (int) Double.parseDouble(String.valueOf(value)
                                 .replace("\"", "").trim());
                     } catch (Throwable t) {
                         return;                     // 解析不出来就当没测到，别乱重载
                     }
-                    if (len < 0) return;            // JS 里抛异常了（页面正在换），忽略
-                    if (len > 20) {
+                    if (ok < 0) return;             // JS 里抛异常了（页面正在换），忽略
+                    if (ok > 0) {
                         blankTicks = 0;
                         probeOkTicks++;
                         return;
                     }
                     probeOkTicks = 0;
                     blankTicks++;
-                    Log.i(TAG, "心跳：页面正文长度 " + len + "（连续第 " + blankTicks + " 次）");
+                    Log.i(TAG, "心跳：页面 20 秒内没有任何变动（连续第 " + blankTicks + " 次）");
                     if (blankTicks >= BLANK_TICKS_TO_RELOAD) {
                         blankTicks = 0;
                         autoReload("页面连续 " + (BLANK_TICKS_TO_RELOAD * RECONNECT_TICK_MS / 1000)
@@ -5166,6 +5230,18 @@ public class MainActivity extends Activity {
             return Ui.dshIsLight(MainActivity.this);
         }
 
+        /**
+         * 长对话渲染优化是否开启（给注入补丁读）。
+         *
+         * <p>为什么走桥而不是写死在 JS 里：这是**用户可以关掉**的东西 ——
+         * 万一某些机型上 {@code content-visibility} 导致滚动跳动，
+         * 关掉开关刷新页面就能恢复，不用卸载。
+         */
+        @android.webkit.JavascriptInterface
+        public boolean longChatOpt() {
+            return MainActivity.longChatOpt(MainActivity.this);
+        }
+
         @android.webkit.JavascriptInterface
         public int statusBarHeight() {
             try {
@@ -5629,6 +5705,37 @@ public class MainActivity extends Activity {
         llp.topMargin = pad / 2;
         box.addView(logBtn, llp);
         logBtn.setOnClickListener(v -> copyLogToClipboard());
+
+        /*
+         * 长对话渲染优化开关（默认开）。
+         *
+         * 它给网页侧的消息列表加 content-visibility:auto —— 屏幕外的消息不再参与
+         * 排版/绘制，长对话首屏和滚动都会明显轻。代价是极少数机型上可能出现
+         * "滚动条位置略跳"，所以留一个明确的关闭入口（关掉后刷新页面即生效）。
+         */
+        android.widget.Switch longChat = new android.widget.Switch(this);
+        longChat.setText("长对话渲染优化");
+        longChat.setTextSize(13f);
+        longChat.setTextColor(Ui.TEXT);
+        longChat.setChecked(longChatOpt(this));
+        longChat.setOnCheckedChangeListener((v, on) -> {
+            setLongChatOpt(this, on);
+            appendReport("  [设置] 长对话渲染优化 → " + (on ? "开" : "关") + "\n");
+            android.widget.Toast.makeText(this,
+                    on ? "已开启（刷新页面后生效）" : "已关闭（重进会话或刷新后生效）",
+                    android.widget.Toast.LENGTH_SHORT).show();
+        });
+        LinearLayout.LayoutParams lclp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        lclp.topMargin = pad / 2;
+        box.addView(longChat, lclp);
+
+        TextView longChatTip = new TextView(this);
+        longChatTip.setTextSize(11f);
+        longChatTip.setTextColor(Ui.SUB);
+        longChatTip.setText("开启后：屏幕外的历史消息不参与排版/绘制，长对话更跟手。\n"
+                + "如果出现滚动位置跳动，关掉它即可。");
+        box.addView(longChatTip);
 
         // 最近一次失败原因（有才显示）—— 普通用户拿不到 report.txt，这是唯一的线索
         if (sLastFailure != null) {

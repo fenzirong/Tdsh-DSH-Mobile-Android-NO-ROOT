@@ -996,9 +996,15 @@ public class DshService extends Service {
             Log.i(TAG, "dsh 进程已启动, apiKey=" + (apiKey.isEmpty() ? "未设置" : "已设置"));
             appendReport("  · [启动] 拉起 dsh 进程 " + (System.currentTimeMillis() - tBoot)
                     + "ms（之后是容器里 node 加载插件的时间）\n");
-            updateNotification(apiKey.isEmpty()
-                    ? "运行中（未设置 API Key）"
-                    : "运行中（已设置 API Key）");
+            /*
+             * 通知栏**不再提 API Key**（2026-11-17，用户要求）。
+             *
+             * 原来这里写"运行中（未设置 API Key）"，而 Key 缺失在很多人的用法里
+             * 是**正常状态**（用中转站/自定义提供方），常驻通知挂一句"未设置"
+             * 只会天天提醒一件不需要处理的事。现在统一写"运行中"。
+             * Key 的状态仍可在「设置」里看到，也仍然写进 report.txt。
+             */
+            updateNotification("运行中");
 
             /*
              * pnpm 放到这里（dsh 进程已经拉起来之后）再装：

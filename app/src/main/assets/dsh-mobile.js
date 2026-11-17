@@ -57,6 +57,11 @@
    */
   if (!document.documentElement) return;
   var root = document.documentElement;
+  /*
+   * "最后一次 DOM 变动"的初值（2026-11-17）。
+   * 原生侧判白屏要读它：没有初值的话，刚注入这几百毫秒会被当成"很久没动"。
+   */
+  try { W.__dshLastMutAt = Date.now(); } catch (e) { }
   var wasOpen = false;          // 设置弹窗上一次是否处于打开状态
 
   var CSS = [
@@ -2346,7 +2351,102 @@
      * 5 秒一次的带界扫描开销可以忽略（现在只扫抽屉和顶栏那一小圈），
      * 但能保证名字最终一定正确。
      */
-    every(guarded(sweepWorkspaceNames), 5000);
+    /*
+     * 2026-11-17：5 秒 → 20 秒。
+     * 真正的改名由上面那个 observer 在"变动发生的当帧"完成，这条只是兜底；
+     * 而它每次要跑几个属性子串选择器，长对话里属于纯开销。
+     */
+    every(guarded(sweepWorkspaceNames), 20000);
+  }
+
+  /*
+   * ══════════ 长对话渲染优化：给消息列表加 content-visibility ══════════
+   *
+   * <h3>为什么（用户报"长对话严重卡顿"）</h3>
+   * DSH 的会话页是把**所有消息**都留在 DOM 里的（没有虚拟列表）。几百上千条之后，
+   * 每来一个 token、每次滚动，浏览器都要为**整棵消息树**做样式计算与布局 ——
+   * 屏幕外那些根本看不见的消息也在参与排版，这是长对话越用越卡的根因之一。
+   *
+   * <p>{@code content-visibility: auto} 让浏览器**跳过屏幕外元素的渲染**：
+   * 它们在布局阶段按 {@code contain-intrinsic-size} 估个高度，滚到附近才算真的排版。
+   * 配上 {@code contain-intrinsic-size: auto 120px}，浏览器会记住每个元素上一次的
+   * 真实高度，滚动条不会因此乱跳。
+   *
+   * <h3>为什么敢自动认领"列表容器"</h3>
+   * 不能写死 DSH 的类名（换个版本就失效），所以用三个保守条件一起卡：
+   *   ① 子节点 ≥ 40（太短不需要优化）；
+   *   ② 这个元素确实是滚动容器（scrollHeight 明显大于 clientHeight）；
+   *   ③ 前几个子节点**类名一致**（是"同类项目的列表"，不是随便一个容器）。
+   * 满足的里面取"节点数 × 可视高度"最大的那个。认错了的后果只是少优化一个容器，
+   * 不会改坏布局 —— 我们只加两个 CSS 属性，不搬动任何节点。
+   *
+   * <h3>用户的退路</h3>
+   * 设置里「长对话渲染优化」可以关（{@code DshAndroid.longChatOpt()}）。
+   * 极少数机型上如果出现滚动位置跳动，关掉它刷新页面即可。
+   */
+  function patchLongChatRendering() {
+    try {
+      if (W.__dshLongChatPatched) return;
+      var A = W.DshAndroid;
+      var on = true;
+      try { if (A && A.longChatOpt) on = !!A.longChatOpt(); } catch (e) { }
+      if (!on) return;
+      // 老 WebView 没有这个属性：直接不装，等于不优化（不是报错）
+      if (!('contentVisibility' in document.documentElement.style)) return;
+      W.__dshLongChatPatched = true;
+
+      var list = null;          // 认出来的列表容器
+      var lastFind = 0;
+
+      function findList() {
+        var now = Date.now();
+        if (list && document.contains(list)) return list;
+        if (now - lastFind < 10000) return null;      // 找不到就 10 秒后再试，别每拍全扫
+        lastFind = now;
+        list = null;
+        var best = 0;
+        var cands;
+        try { cands = document.querySelectorAll('div,section,ul,main'); } catch (e) { return null; }
+        for (var i = 0; i < cands.length; i++) {
+          var el = cands[i];
+          var n = el.children.length;
+          if (n < 40) continue;
+          try {
+            if (el.scrollHeight <= el.clientHeight + 200) continue;
+            var c0 = el.children[0].className;
+            var same = true;
+            for (var j = 1; j < Math.min(n, 8); j++) {
+              if (el.children[j].className !== c0) { same = false; break; }
+            }
+            if (!same) continue;
+          } catch (e2) { continue; }
+          var score = n * (el.clientHeight || 1);
+          if (score > best) { best = score; list = el; }
+        }
+        return list;
+      }
+
+      function apply() {
+        var el = findList();
+        if (!el) return;
+        var kids = el.children;
+        for (var i = 0; i < kids.length; i++) {
+          var k = kids[i];
+          if (!k || k.nodeType !== 1) continue;
+          if (k.getAttribute('data-dsh-cv')) continue;
+          k.setAttribute('data-dsh-cv', '1');
+          try {
+            k.style.setProperty('content-visibility', 'auto');
+            // auto 关键字 = 记住上次渲染出来的真实高度，滚动条才不跳
+            k.style.setProperty('contain-intrinsic-size', 'auto 120px');
+          } catch (e) { }
+        }
+      }
+
+      apply();
+      // 新消息是增量插入的：3 秒补一次即可（每拍只遍历子节点，不做全文档扫描）
+      every(guarded(apply), 3000);
+    } catch (e) { }
   }
 
   function patchThemeReport() {
@@ -2609,6 +2709,22 @@ function patchDownloads() {
      * 放在网页侧就是同一层背景自己延伸，零接缝。
      */
     (function padForStatusBar() {
+      /*
+       * 缓存那个侧边栏元素（2026-11-17，长对话卡顿）。
+       *
+       * `document.querySelector('[class*="sidebarCol"]')` 是**属性子串选择器**：
+       * 每调用一次都要把全文档每个元素的 class 拿出来做子串匹配。长对话里
+       * DOM 上万节点，而这里原来**每 2 秒**调一次 —— 纯浪费。
+       * 元素很少变，缓存住；只有它被 React 重建（从文档里掉了）才重新找。
+       */
+      var sideEl = null;
+      function sidebarCol() {
+        try {
+          if (sideEl && document.contains(sideEl)) return sideEl;
+          sideEl = document.querySelector('[class*="sidebarCol"]');
+        } catch (e) { sideEl = null; }
+        return sideEl;
+      }
       function apply() {
         try {
           if (!(window.DshAndroid && window.DshAndroid.statusBarHeight)) return;
@@ -2629,7 +2745,7 @@ function patchDownloads() {
             document.body.style.setProperty('padding-top', px, 'important');
             document.body.style.setProperty('box-sizing', 'border-box', 'important');
           }
-          var side = document.querySelector('[class*="sidebarCol"]');
+          var side = sidebarCol();
           if (side && side.style.paddingTop !== px) side.style.setProperty('padding-top', px, 'important');
         } catch (e) { }
       }
@@ -2637,6 +2753,8 @@ function patchDownloads() {
       every(guarded(apply), POLL_MS);
     })();
     patchThemeReport();
+    // 长对话渲染优化（见 patchLongChatRendering 的注释；设置里可关）
+    patchLongChatRendering();
     // 侧边栏工作区名改成"用户选的手机文件夹名"（见 patchWorkspaceNames 的注释）
     patchWorkspaceNames();
     // 记下当前会话（插件页一开，这个信息就再也问不出来了，见函数注释）
@@ -2999,20 +3117,34 @@ function patchDownloads() {
 
     try {
       obs = new MutationObserver(function (muts) {
-        // 一次最多处理 160 条：流式输出时变更可能几千条，全处理反而拖慢页面
-        var n = Math.min(muts.length, 160);
+        /*
+         * 顺手记一个"最后一次 DOM 变动时刻"（2026-11-17）。
+         *
+         * 原生侧判"白屏"以前是每 5 秒读一遍 document.body.textContent.length ——
+         * 那是 O(全部文本) 的，长对话里等于每 5 秒把几 MB 正文拼一遍字符串。
+         * 现在原生只需要问这个时间戳（O(1)），页面在动的时候一次都不用读正文。
+         */
+        if (muts.length) {
+          lastSignalAt = Date.now();
+          try { W.__dshLastMutAt = lastSignalAt; } catch (e) { }
+        }
+        /*
+         * 一次最多处理 60 条（原 160）：流式输出时变更可能有几千条，
+         * 而且**只有 characterData 才需要 ignoreNode**（判断是不是在输入框里打字）。
+         * 新增节点直接算"有动静"，不再对每条 addedNode 跑 closest() —— 
+         * 那个 closest 是长对话里最不该出现的每节点开销。
+         */
+        var n = Math.min(muts.length, 60);
         for (var i = 0; i < n; i++) {
           var m = muts[i];
           try {
-            if (ignoreNode(m.target)) continue;
             if (m.type === 'characterData') {
-              charHits++;
+              if (!ignoreNode(m.target)) charHits++;
             } else if (m.addedNodes && m.addedNodes.length) {
               nodeHits++;
             }
           } catch (e) { }
         }
-        if (muts.length) lastSignalAt = Date.now();
       });
       obs.observe(document.body || document.documentElement, {
         childList: true, subtree: true, characterData: true

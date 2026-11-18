@@ -6,6 +6,47 @@
 
 ---
 
+## v0.4.21-fz1
+
+（`versionCode 72 → 73`。**包名改为 `com.dsh.tdsh`**，项目迁入 `dsh-mobile` 仓库。）
+
+### 为什么改
+
+项目从 `Tdsh-DSH-Mobile-Android-NO-ROOT`（即将转为私密）迁到 `dsh-mobile`，
+同时换一个干净的应用身份：`com.dshmobile.probe` → **`com.dsh.tdsh`**。
+
+### ⚠️ 这是一次"换应用"，不是普通升级
+
+| 项 | 影响 |
+| --- | --- |
+| 安装 | 新包名是**另一个应用**，可以和旧版并存；旧版不会被覆盖 |
+| 数据 | **旧版的容器（约 150MB）、API Key、白名单、会话都不会跟过来** —— 新装是全新环境 |
+| 签名 | 仍用同一把发布密钥；同包名的后续版本照旧可覆盖安装 |
+| 权限 | `WRITE_SECURE_SETTINGS` 等一次性授权要**对新包名重新做一次**（`pm grant com.dsh.tdsh …`） |
+
+想保留旧环境的话：先别卸载旧版，等新版把容器装好、确认可用之后再删。
+
+### 怎么改的（可重复）
+
+包名散落在 100+ 处（Java `package`/`import`、AIDL 的 `package` 声明与目录、
+`AndroidManifest` 的组件名、`build.gradle` 的 `namespace`/`applicationId`、
+`AGENTS.md` 里给 agent 看的 `pm grant` 命令、docs 里的 `run-as` 示例…），手改必漏。
+所以做成脚本：
+
+```bash
+./tools/rename-package.sh com.dsh.tdsh com.example.newid
+```
+
+它会移动 Java/AIDL 目录、改写所有被 git 跟踪的文本文件、最后**自检残留**（有残留就报错退出）。
+本次已用它把 88 个文件改完，并修掉了脚本第一版因文件名含中文而漏改的两处文档。
+
+### 顺带
+
+- `tools/rename-package.sh` 里的遍历改成 `git ls-files -z` + `read -d ''`，
+  文件名含空格/中文也不会漏（第一版就是在这里漏了两个文档）。
+
+---
+
 ## v0.4.20-fz1
 
 （`versionCode 71 → 72`。按工作区里那个「合并 Termux」项目与 TAWC/dsh-go 的做法，
@@ -24,7 +65,7 @@
 
 **但它的关键技巧我们不能用**：它把包名定成 `com.dshapp`（**10 字节**），
 与 `com.termux`（10 字节）等长，于是可以对 bootstrap 与每个 .deb 做**等长字节替换**。
-本 App 的包名是 `com.dshmobile.probe`（**18 字节**），一变长就会破坏 ELF 的
+本 App 的包名是 `com.dsh.tdsh`（**18 字节**），一变长就会破坏 ELF 的
 `DT_RUNPATH` 与 bash 的编译期路径（`.rodata` 偏移）。
 
 ### 我们的接法：一个字节都不补丁，用 tawcroot 把前缀绑过来
@@ -668,7 +709,7 @@ Activity 后面照旧调用 `startDshService()`，不会起第二个容器。
 
 ### 怎么验证这次的改动
 
-启动后看 App 私有目录里的 `report.txt`（`adb exec-out run-as com.dshmobile.probe cat files/probe/report.txt`），
+启动后看 App 私有目录里的 `report.txt`（`adb exec-out run-as com.dsh.tdsh cat files/probe/report.txt`），
 里面现在会多出这几行：
 
 ```
@@ -1638,7 +1679,7 @@ App 装容器时执行的是 `npm install -g @deepseek-ai/dsh`（**不锁版本*
 
 另外「手机控制」页加了一个按钮：**「把「XX」加入白名单」**，
 取的是"上一个不是本 App 的前台应用" —— 用户在设置页里点时，
-前台其实是 App 自己，直接取当前前台只会拿到 `com.dshmobile.probe`，毫无用处。
+前台其实是 App 自己，直接取当前前台只会拿到 `com.dsh.tdsh`，毫无用处。
 
 > 边界没有放宽：这只是把"同意"从六步压成一步，**加不加仍然由用户点那一下决定**。
 
@@ -1798,7 +1839,7 @@ B 站有位用户反馈"加载了本地语音识别插件，但 App 不申请麦
 | 步骤 | 默认输入法 |
 |---|---|
 | 起始 | `com.sohu.inputmethod.sogou.vivo/.SogouIME`（用户自己的） |
-| `phone text` 后（这次提交失败） | `com.dshmobile.probe/…DshImeService`，桥状态显示"将在 5 秒后自动切回" |
+| `phone text` 后（这次提交失败） | `com.dsh.tdsh/…DshImeService`，桥状态显示"将在 5 秒后自动切回" |
 | 再等 8 秒 | `com.sohu.inputmethod.sogou.vivo/.SogouIME` ✅ 自己回来了 |
 
 `AGENTS.md` 里那条"★ 别忘了还原输入法"的硬性要求也随之删掉了 ——
@@ -2258,7 +2299,7 @@ phone_swipe   phone_text        phone_key     phone_open    phone_ime
 1. 先用 `pm revoke` 把 `WRITE_SECURE_SETTINGS` 拿掉，制造"未授权"状态；
 2. 在 App 里点「⚡ 用 Shizuku 授权」→ Shizuku 弹出授权窗 → 允许；
 3. App 通过 `bindUserService` 把 `ShellUserService` 以 shell 身份拉起来，执行
-   `pm grant com.dshmobile.probe android.permission.WRITE_SECURE_SETTINGS`；
+   `pm grant com.dsh.tdsh android.permission.WRITE_SECURE_SETTINGS`；
 4. `dumpsys package` 确认 **`granted=true`** —— **全程没有用电脑**。
 
 顺带验证：授权后自愈功能恢复正常，连续 3 次清零都在约 350 ms 内补回。
@@ -2314,7 +2355,7 @@ DSH 的手机控制能力随机失效，只能反复手动去设置里重开。�
 可以用 `pm grant` 单独授予**：
 
 ```
-adb shell pm grant com.dshmobile.probe android.permission.WRITE_SECURE_SETTINGS
+adb shell pm grant com.dsh.tdsh android.permission.WRITE_SECURE_SETTINGS
 ```
 
 关键在于**授权结果是持久化的**（写进 packages.xml，重启手机、覆盖更新 App 都不会掉），

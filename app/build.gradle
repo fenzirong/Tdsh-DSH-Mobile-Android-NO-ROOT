@@ -18,11 +18,11 @@ if (keystorePropsFile.exists()) {
 }
 
 android {
-    namespace 'com.dshmobile.probe'
+    namespace 'com.dsh.tdsh'
     compileSdk 36
 
     defaultConfig {
-        applicationId "com.dshmobile.probe"
+        applicationId "com.dsh.tdsh"
         minSdk 24
         targetSdk 28          // ← 不许改大，见上方注释
         /*
@@ -40,12 +40,11 @@ android {
          * 详见 CHANGELOG 的 v0.4.11-fz1。
          */
         /*
-         * 0.4.20-fz1：Termux 路线（bionic 原生 node + tawcroot 只做前缀映射），
-         * 带同样的准入闸门；用户态未装则安静回落 PRoot。
-         * 详见 CHANGELOG 的 v0.4.20-fz1 与 docs/termux-route.md。
+         * 0.4.21-fz1：包名改为 com.dsh.tdsh（迁入 dsh-mobile 仓库后的新身份）。
+         * 详见 CHANGELOG 的 v0.4.21-fz1。
          */
-        versionCode 72
-        versionName "0.4.20-fz1"
+        versionCode 73
+        versionName "0.4.21-fz1"
     }
 
     signingConfigs {

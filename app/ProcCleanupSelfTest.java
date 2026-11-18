@@ -1,4 +1,4 @@
-import com.dshmobile.probe.ProcLogic;
+import com.dsh.tdsh.ProcLogic;
 
 /**
  * ProcLogic 的回归测试 —— 「清理残留子进程」里唯一危险的一步：**判断哪些进程是我们的**。
@@ -7,14 +7,14 @@ import com.dshmobile.probe.ProcLogic;
  * 所以这里用真实 cmdline 形状做用例，把"该匹配的"和"绝不能匹配的"都钉住。
  *
  * 用例取材自真机（2026-10-05，vivo V2408A / Android 16）：
- *   · 容器外壳：`proot -r /data/user/0/com.dshmobile.probe/files/probe/rootfs -0 -w /sdcard/dsh …`
+ *   · 容器外壳：`proot -r /data/user/0/com.dsh.tdsh/files/probe/rootfs -0 -w /sdcard/dsh …`
  *   · DSH 本体：`node /opt/node-v22.23.2-linux-arm64/bin/dsh --profile web --no-open --port 3080`
  *   · 容器里的 node（第一版漏了这类：清完还剩下一个 185MB 的 node）
  *
  * 用法（在仓库根目录）:
  *   javac -encoding UTF-8 -d %TEMP%/pctest tools/ProcCleanupSelfTest.java ^
- *         DshMobile/app/src/main/java/com/dshmobile/probe/ProcCleanup.java ^
- *         DshMobile/app/src/main/java/com/dshmobile/probe/Env.java
+ *         DshMobile/app/src/main/java/com/dsh/tdsh/ProcCleanup.java ^
+ *         DshMobile/app/src/main/java/com/dsh/tdsh/Env.java
  *   java -Dstdout.encoding=UTF-8 -cp %TEMP%/pctest ProcCleanupSelfTest
  *
  * 注意：Env 依赖 Android（它只是被 ProcCleanup 引用到字段），所以正式自检清单里
@@ -37,7 +37,7 @@ public class ProcCleanupSelfTest {
     }
 
     private static final String ROOTFS =
-            "/data/user/0/com.dshmobile.probe/files/probe/rootfs";
+            "/data/user/0/com.dsh.tdsh/files/probe/rootfs";
     private static final String NODE_BIN = ROOTFS + "/opt/node-v22.23.2-linux-arm64/bin/node";
 
     /** 分类结果的 kind（null 表示"不是我们的"）。 */
@@ -52,7 +52,7 @@ public class ProcCleanupSelfTest {
                 "容器外壳（proot）",
                 kind("proot -r " + ROOTFS + " -0 -w /sdcard/dsh --link2symlink --kill-on-exit "
                         + "-b /dev -b /proc -b /sys -b /storage/emulated/0:/sdcard "
-                        + "-b /data/user/0/com.dshmobile.probe/files/probe:/app-data "
+                        + "-b /data/user/0/com.dsh.tdsh/files/probe:/app-data "
                         + "/usr/bin/env -i HOME=/root /opt/node-v22.23.2-linux-arm64/bin/dsh --profile web"));
         eq("DSH 本体（绝对路径形式）",
                 "DSH 本体（node）",

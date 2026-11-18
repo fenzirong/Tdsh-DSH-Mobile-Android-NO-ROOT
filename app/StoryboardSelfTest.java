@@ -1,4 +1,4 @@
-import com.dshmobile.probe.Storyboard;
+import com.dsh.tdsh.Storyboard;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -15,7 +15,7 @@ import java.util.List;
  *
  * 用法（在仓库根目录）:
  *   javac -encoding UTF-8 -d %TEMP%/sbtest tools/StoryboardSelfTest.java ^
- *         DshMobile/app/src/main/java/com/dshmobile/probe/Storyboard.java
+ *         DshMobile/app/src/main/java/com/dsh/tdsh/Storyboard.java
  *   java -Dstdout.encoding=UTF-8 -cp %TEMP%/sbtest StoryboardSelfTest
  */
 public class StoryboardSelfTest {

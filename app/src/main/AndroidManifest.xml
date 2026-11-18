@@ -48,7 +48,7 @@
       这个权限的 protectionLevel 是 signature|privileged|development，
       普通应用装完拿不到，但**带 development 标志的权限可以用 pm grant 单独授予**：
 
-          adb shell pm grant com.dshmobile.probe android.permission.WRITE_SECURE_SETTINGS
+          adb shell pm grant com.dsh.tdsh android.permission.WRITE_SECURE_SETTINGS
 
       关键点：pm grant 的结果是**持久化**的（写进 packages.xml，
       重启、清后台都不会掉），所以只需要做一次。

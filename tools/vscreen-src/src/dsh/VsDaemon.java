@@ -169,7 +169,7 @@ public class VsDaemon {
     try {
       String pkg = js(body, "pkg"), act = js(body, "act");
       // ⛔ 宿主 App 永不搬上虚拟屏：跨屏 = 配置变更 = MainActivity 重建 = 界面重启
-      if ("com.dshmobile.probe".equals(pkg))
+      if ("com.dsh.tdsh".equals(pkg))
         return "{\"ok\":false,\"error\":\"refused: host app must never be launched on a virtual display\"}".getBytes();
       int i = jn(body, "i", 0), wm = jn(body, "wm", 5);   // 默认 freeform(5)
       if (i < 0 || i >= slots.length) i = 0;

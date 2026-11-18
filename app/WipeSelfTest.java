@@ -1,4 +1,4 @@
-import com.dshmobile.probe.Wipe;
+import com.dsh.tdsh.Wipe;
 
 import java.io.File;
 import java.io.FileWriter;
@@ -13,7 +13,7 @@ import java.nio.file.Files;
  *
  * 用法（仓库根目录）:
  *   javac -encoding UTF-8 -d %TEMP%\wtest tools\WipeSelfTest.java ^
- *         DshMobile\app\src\main\java\com\dshmobile\probe\Wipe.java
+ *         DshMobile\app\src\main\java\com.dsh.tdsh\Wipe.java
  *   java -cp %TEMP%\wtest WipeSelfTest
  */
 public class WipeSelfTest {

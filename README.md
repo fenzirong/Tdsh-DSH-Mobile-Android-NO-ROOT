@@ -72,7 +72,7 @@
 （写进 `packages.xml`，重启手机、更新 App 都不会掉）：
 
 ```bash
-adb shell pm grant com.dshmobile.probe android.permission.WRITE_SECURE_SETTINGS
+adb shell pm grant com.dsh.tdsh android.permission.WRITE_SECURE_SETTINGS
 ```
 
 没有电脑的用户可以走 **Shizuku**（它以 shell 身份代跑这条命令），

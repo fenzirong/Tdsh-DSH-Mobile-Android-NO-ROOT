@@ -1,4 +1,4 @@
-import com.dshmobile.probe.JsCompat;
+import com.dsh.tdsh.JsCompat;
 
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
@@ -15,7 +15,7 @@ import java.nio.file.Paths;
  *
  * 用法（在仓库根目录）:
  *   javac -encoding UTF-8 -d %TEMP%\jstest tools\JsCompatSelfTest.java ^
- *         DshMobile\app\src\main\java\com\dshmobile\probe\JsCompat.java
+ *         DshMobile\app\src\main\java\com.dsh.tdsh\JsCompat.java
  *   java -cp %TEMP%\jstest JsCompatSelfTest tools\dshweb\index.js tools\dshweb\index.rewritten.js
  */
 public class JsCompatSelfTest {

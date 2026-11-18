@@ -1,4 +1,4 @@
-import com.dshmobile.probe.VScreenCmd;
+import com.dsh.tdsh.VScreenCmd;
 
 /**
  * VScreenCmd 的回归测试 —— 「虚拟屏一键安装」里最容易写错、又只能真机才暴露的东西：
@@ -12,7 +12,7 @@ import com.dshmobile.probe.VScreenCmd;
  *
  * 用法（在仓库根目录）:
  *   javac -encoding UTF-8 -d %TEMP%/vstest tools/VScreenCmdSelfTest.java ^
- *         DshMobile/app/src/main/java/com/dshmobile/probe/VScreenCmd.java
+ *         DshMobile/app/src/main/java/com/dsh/tdsh/VScreenCmd.java
  *   java -Dstdout.encoding=UTF-8 -cp %TEMP%/vstest VScreenCmdSelfTest
  */
 public class VScreenCmdSelfTest {
@@ -42,14 +42,14 @@ public class VScreenCmdSelfTest {
         eq("null 当空串", "''", VScreenCmd.shq(null));
 
         System.out.println("── 安装脚本：该有的都要有 ──");
-        String s = VScreenCmd.installScript("/sdcard/Android/data/com.dshmobile.probe/files/vsd", token);
+        String s = VScreenCmd.installScript("/sdcard/Android/data/com.dsh.tdsh/files/vsd", token);
         ok("dex 与 token 落到 /data/local/tmp/dsh-vsd",
                 s.contains("D=" + VScreenCmd.DEVICE_DIR) && s.contains("$D/vs-daemon.dex")
                         && s.contains("$D/shell-daemon.dex") && s.contains("$D/" + VScreenCmd.TOKEN_FILE), s);
         ok("dex 与 token chmod 600（只有 shell 能读）",
                 s.contains("chmod 600 $D/vs-daemon.dex $D/shell-daemon.dex $D/" + VScreenCmd.TOKEN_FILE), s);
         ok("暂存路径里的单引号会被包好（路径带空格也能用）",
-                s.contains("S='/sdcard/Android/data/com.dshmobile.probe/files/vsd'"), s);
+                s.contains("S='/sdcard/Android/data/com.dsh.tdsh/files/vsd'"), s);
         ok("清陈旧 dalvik-cache（否则 app_process 直接 Aborted）",
                 s.contains("rm -rf /data/local/tmp/dalvik-cache"), s);
         ok("按 cmdline 精确杀旧实例，而不是 pkill -f",

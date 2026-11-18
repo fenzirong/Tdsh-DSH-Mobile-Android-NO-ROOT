@@ -1,4 +1,4 @@
-import com.dshmobile.probe.UrlPick;
+import com.dsh.tdsh.UrlPick;
 
 /**
  * UrlPick 的回归测试 —— 用的全是**用户日志里的真实行**。
@@ -9,7 +9,7 @@ import com.dshmobile.probe.UrlPick;
  *
  * 用法（在仓库根目录）:
  *   javac -encoding UTF-8 -d %TEMP%/urltest tools/UrlPickSelfTest.java ^
- *         DshMobile/app/src/main/java/com/dshmobile/probe/UrlPick.java
+ *         DshMobile/app/src/main/java/com/dsh/tdsh/UrlPick.java
  *   java -cp %TEMP%/urltest UrlPickSelfTest
  */
 public class UrlPickSelfTest {

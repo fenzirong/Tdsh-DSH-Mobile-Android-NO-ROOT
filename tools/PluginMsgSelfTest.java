@@ -1,4 +1,4 @@
-import com.dshmobile.probe.PluginMsg;
+import com.dsh.tdsh.PluginMsg;
 
 import java.util.Arrays;
 import java.util.List;
@@ -16,7 +16,7 @@ import java.util.List;
  *
  * 用法（在仓库根目录）:
  *   javac -encoding UTF-8 -d %TEMP%\pmtest tools\PluginMsgSelfTest.java ^
- *         DshMobile\app\src\main\java\com\dshmobile\probe\PluginMsg.java
+ *         DshMobile\app\src\main\java\com.dsh.tdsh\PluginMsg.java
  *   java -cp %TEMP%\pmtest PluginMsgSelfTest
  */
 public class PluginMsgSelfTest {

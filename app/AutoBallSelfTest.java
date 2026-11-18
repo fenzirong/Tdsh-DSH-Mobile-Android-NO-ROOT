@@ -1,4 +1,4 @@
-import com.dshmobile.probe.AutoBall;
+import com.dsh.tdsh.AutoBall;
 
 /**
  * AutoBall 的回归测试 —— 「悬浮球什么时候出现」的判据。
@@ -11,7 +11,7 @@ import com.dshmobile.probe.AutoBall;
  *
  * 用法（在仓库根目录）:
  *   javac -encoding UTF-8 -d %TEMP%/abtools tools/AutoBallSelfTest.java ^
- *         DshMobile/app/src/main/java/com/dshmobile/probe/AutoBall.java
+ *         DshMobile/app/src/main/java/com/dsh/tdsh/AutoBall.java
  *   java -Dstdout.encoding=UTF-8 -cp %TEMP%/abtools AutoBallSelfTest
  */
 public class AutoBallSelfTest {

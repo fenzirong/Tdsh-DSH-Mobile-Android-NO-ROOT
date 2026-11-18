@@ -58,7 +58,7 @@ CLASSPATH=/data/local/tmp/dsh-vsd/shell-daemon.dex app_process /system/bin dsh.S
 | **G** | ShellDaemon | 端口与 token 文件从 `args` 取；中文按**字节**记账（`Content-Length` 是字节数，不是字符数） | 原版写死 `/sdcard/dsh/.shd-token`；按字符读 body 会让中文命令挂到 30 秒超时 |
 
 行为保持不变的：HTTP 路由与响应格式、虚拟屏 flags（`PUBLIC|TOUCH|OWNFOCUS|TRUSTED|OWN_CONTENT`）、
-**拒绝把宿主 App（`com.dshmobile.probe`）放上虚拟屏**、`/res` 的同 dp 档位算法、
+**拒绝把宿主 App（`com.dsh.tdsh`）放上虚拟屏**、`/res` 的同 dp 档位算法、
 `/exec` 的 `[EXIT=n]` / `[TIMEOUT]` / `[EXIT=-9]` 约定。
 
 ---
@@ -109,7 +109,7 @@ HTTP 契约（PC 侧 node 直连，与 `dsh-vscreen` 插件同一套请求）：
 |---|---|
 | `GET /list` 不带 token | **403 `DENIED`**（加固 A 生效） |
 | `GET /list` 带 token | `[{"i":0,"displayId":32,...,"trusted":true},{...}]` |
-| `POST /launch {pkg:"com.dshmobile.probe"}` | `{"ok":false,"error":"refused: host app must never be launched on a virtual display"}` |
+| `POST /launch {pkg:"com.dsh.tdsh"}` | `{"ok":false,"error":"refused: host app must never be launched on a virtual display"}` |
 | `POST /launch {pkg:"com.android.settings"}` | `{"ok":true,...,"displayId":32,"wm":5}`，随后 `frames` 从 0 涨到 42 |
 | `GET /0/frame?w=360` | 200，**23955 字节，JPEG 头 `ff d8 ff`**（画面确实是「设置」） |
 | `POST :18242/exec` body=`echo 中文测试; id` | `中文测试` + `uid=2000(shell) ...` + `[EXIT=0]`（**中文正确、且输出里不再有内部标记行**） |

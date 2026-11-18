@@ -1,4 +1,4 @@
-import com.dshmobile.probe.BallStage;
+import com.dsh.tdsh.BallStage;
 
 /**
  * BallStage（悬浮球任务阶段判定）的离线回归测试。
@@ -13,7 +13,7 @@ import com.dshmobile.probe.BallStage;
  *
  * 用法（仓库根目录）:
  *   javac -encoding UTF-8 -d %TEMP%\bstest tools\BallStageSelfTest.java ^
- *         DshMobile\app\src\main\java\com\dshmobile\probe\BallStage.java
+ *         DshMobile\app\src\main\java\com.dsh.tdsh\BallStage.java
  *   java -cp %TEMP%\bstest BallStageSelfTest
  */
 public class BallStageSelfTest {

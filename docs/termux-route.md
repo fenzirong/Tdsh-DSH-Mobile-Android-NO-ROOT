@@ -35,7 +35,7 @@
 参考实现的包名是 `com.dshapp`（**10 字节**），与 `com.termux`（10 字节）等长，
 所以可以对 bootstrap 和每个 .deb 做**等长字节替换**而不破坏 ELF 偏移。
 
-本 App 的包名是 `com.dshmobile.probe`（**18 字节**）。等长替换不成立：
+本 App 的包名是 `com.dsh.tdsh`（**18 字节**）。等长替换不成立：
 Termux 的二进制把 `/data/data/com.termux/files/usr` 硬编码进了
 
 - 脚本 shebang（文本，改多长都行）；

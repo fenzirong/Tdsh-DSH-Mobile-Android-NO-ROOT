@@ -226,7 +226,7 @@ A：**只有用 Shizuku 做的事需要重做**（比如"直接命令"后端）�
 **Q：手机上根本装不了 Shizuku / 不想装，怎么办？**
 A：用**电脑**跑一条命令效果完全一样（见「第八节」）：
 ```
-adb shell pm grant com.dshmobile.probe android.permission.WRITE_SECURE_SETTINGS
+adb shell pm grant com.dsh.tdsh android.permission.WRITE_SECURE_SETTINGS
 ```
 同样是一次性、永久有效。
 
@@ -265,7 +265,7 @@ A：那个开关需要 **Shizuku 当时正在运行**（它每次都要现场执
 如果只是想要那一个权限，电脑 + 数据线是最直接的：
 
 ```
-adb shell pm grant com.dshmobile.probe android.permission.WRITE_SECURE_SETTINGS
+adb shell pm grant com.dsh.tdsh android.permission.WRITE_SECURE_SETTINGS
 ```
 
 - 需要先开「开发者选项 → USB 调试」并连上电脑；

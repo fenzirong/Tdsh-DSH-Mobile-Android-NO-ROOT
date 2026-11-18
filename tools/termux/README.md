@@ -26,7 +26,7 @@ Termux 的二进制把 `/data/data/com.termux/files/usr` 硬编码进了 RUNPATH
 
 ```bash
 adb push usr.tar.gz /data/local/tmp/
-adb shell run-as com.dshmobile.probe sh -c '
+adb shell run-as com.dsh.tdsh sh -c '
   mkdir -p files/probe/termux
   tar -xzf /data/local/tmp/usr.tar.gz -C files/probe/termux
 '

@@ -1,4 +1,4 @@
-import com.dshmobile.probe.Relay;
+import com.dsh.tdsh.Relay;
 
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -17,7 +17,7 @@ import java.util.List;
  *
  * 用法（在仓库根目录）:
  *   javac -encoding UTF-8 -d %TEMP%\relaytest tools\ProvidersSelfTest.java ^
- *         DshMobile\app\src\main\java\com\dshmobile\probe\Relay.java
+ *         DshMobile\app\src\main\java\com.dsh.tdsh\Relay.java
  *   java -Dstdout.encoding=UTF-8 -cp %TEMP%\relaytest ProvidersSelfTest
  */
 public class ProvidersSelfTest {
